@@ -1,7 +1,7 @@
 """
-Plan-to-C knowledge transfer for Shadow-D (Stufe 8).
+Plan-to-C knowledge transfer for the B→C planning extension (Stufe 8).
 
-Translates Shadow-D's ZPlan output into C-memory updates, specifically
+Translates PlannerBC's ZPlan output into C-memory updates, specifically
 populating tie_break_preference which C already reads (agent_c.py:90-98)
 but was never populated until now.
 """
@@ -15,7 +15,7 @@ def deconstruct_plan_to_c(
     confidence_threshold: float = 0.3,
 ) -> ZC:
     """
-    Translate Shadow-D's plan into C-memory updates.
+    Translate PlannerBC's plan into C-memory updates.
 
     Sets:
     - tie_break_preference: first actions from plan's recommended sequence
@@ -28,7 +28,7 @@ def deconstruct_plan_to_c(
 
     Args:
         zC: Current C-stream state
-        zPlan: Shadow-D's planning output
+        zPlan: PlannerBC's planning output
         confidence_threshold: Minimum confidence to accept plan
     """
     mem = dict(zC.memory) if zC.memory else {}

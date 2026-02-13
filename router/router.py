@@ -13,7 +13,7 @@ class RouterConfig:
 
     d_cooldown_steps: int = 8
 
-    # Shadow-D (planning) configuration (Stufe 8)
+    # B→C planning extension configuration (Stufe 8)
     enable_planning_trigger: bool = False
     planning_uncertainty_threshold: float = 0.25
     planning_cooldown_steps: int = 4
@@ -23,11 +23,11 @@ class RouterConfig:
 class RegimeStep:
     """Record of the active regime at a single timestep."""
     t: int
-    regime: str       # "3D", "4D", or "5D"
+    regime: str       # "3D", "4D", or "3D+" (planning-extended)
     d_activated: bool
     trigger: str      # reason D was activated, or "none"
     decision_delta: Optional[float] = None
-    shadow_d_activated: bool = False
+    planner_activated: bool = False
 
 
 class Router:
@@ -91,14 +91,14 @@ class Router:
         ))
         return False, "none"
 
-    def should_activate_shadow_d(
+    def should_activate_planner(
         self,
         t: int,
         decision_delta: Optional[float] = None,
         plan_active: bool = False,
     ) -> tuple[bool, str]:
         """
-        Decide whether to activate Shadow-D for forward planning.
+        Decide whether to activate the B→C planner for forward planning.
 
         Triggers when C is uncertain and no plan is currently active.
         Uses separate cooldown from narrative-D.
@@ -125,22 +125,26 @@ class Router:
         self,
         t: int,
         d_activated: bool,
-        shadow_d_activated: bool,
+        planner_activated: bool,
         trigger: str,
         decision_delta: Optional[float] = None,
     ):
         """
-        Log a regime step with both D and Shadow-D status.
+        Log a regime step with D and planner status.
 
         Regime determination:
-        - 3D: C only (no D, no Shadow-D)
-        - 4D: C + narrative-D or C + Shadow-D
-        - 5D: C + narrative-D + Shadow-D
+        - 3D: C only (no D, no planner)
+        - 4D: C + narrative-D
+        - 3D+: C + B→C planner (extended lookahead, not a new dimension)
+
+        Note: The planner deepens B↔C coupling — it does not add a new
+        dimensional stream. "3D+" indicates enhanced 3D, not a new regime.
+        When both D and planner are active, it's 4D with planning assist.
         """
-        if d_activated and shadow_d_activated:
-            regime = "5D"
-        elif d_activated or shadow_d_activated:
+        if d_activated:
             regime = "4D"
+        elif planner_activated:
+            regime = "3D+"
         else:
             regime = "3D"
 
@@ -149,12 +153,12 @@ class Router:
             d_activated=d_activated,
             trigger=trigger,
             decision_delta=decision_delta,
-            shadow_d_activated=shadow_d_activated,
+            planner_activated=planner_activated,
         ))
 
     def regime_summary(self) -> Dict[str, int]:
         """Count steps in each regime."""
-        counts = {"3D": 0, "4D": 0, "5D": 0}
+        counts = {"3D": 0, "3D+": 0, "4D": 0}
         for step in self.regime_log:
             counts[step.regime] = counts.get(step.regime, 0) + 1
         return counts

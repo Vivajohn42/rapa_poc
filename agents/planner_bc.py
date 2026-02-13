@@ -1,13 +1,18 @@
 """
-Shadow-D: Forward-planning agent using B's deterministic model (Stufe 8).
+B→C Planning Extension: Multi-step lookahead using B's forward model (Stufe 8).
 
-Unlike narrative-D which processes past events, Shadow-D plans future
-trajectories. It uses Agent B's predict_next as a forward model to
-evaluate action sequences via beam search.
+This is NOT a second D-agent. It deepens the existing B↔C coupling by
+extending C's 1-step lookahead to N-step beam search. B's deterministic
+predict_next serves as the forward model; the result flows into C's
+tie_break_preference.
 
-Key advantage over C's 1-step lookahead: Shadow-D looks N steps ahead,
-which lets it detect and avoid dead-ends and obstacles that C cannot see
-from its single-step horizon.
+Architecturally: this is a B→C planning horizon extension, not a new
+dimensional stream. It does not generate narrative, meaning tags, or
+any D-like output.
+
+Key advantage over C's 1-step lookahead: the planner looks N steps ahead,
+which lets it detect and route around dead-ends and obstacle clusters
+that C cannot see from its single-step horizon.
 
 Output flows to C via deconstruct_plan_to_c -> tie_break_preference.
 """
@@ -31,9 +36,9 @@ class _RolloutResult:
     reward_estimate: float
 
 
-class AgentShadowD:
+class PlannerBC:
     """
-    Forward-planning agent that evaluates multi-step action sequences.
+    Multi-step planning extension for the B→C coupling.
 
     Uses B's predict_next for deterministic rollouts. Scores sequences by:
     - Manhattan distance improvement toward target

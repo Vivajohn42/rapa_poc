@@ -18,12 +18,13 @@ The MVP is implemented in a GridWorld environment with partial observability and
 
 ```
 A (Perception) --> B (Dynamics) --> C (Valence/Control) --> Action
-|                                    ^           ^
-|  (observation)                     |           | (tie_break via Deconstruct_Plan)
-+---> D (Narrative) --> Deconstruct -+           |
-|     ^                                   Shadow-D (Planning)
-|     | (Router: gated by C's uncertainty)    ^
-+-----+--------------------------------------+
+|                       |            ^           ^
+|  (observation)        |            |           | (tie_break via Deconstruct_Plan)
++---> D (Narrative) --> | Deconstruct+           |
+|     ^                 +--- PlannerBC ----------+
+|     |                      (multi-step B→C lookahead)
+|     | (Router: gated by C's uncertainty)
++-----+
 ```
 
 | Stream | Role | Implementation |
@@ -33,10 +34,10 @@ A (Perception) --> B (Dynamics) --> C (Valence/Control) --> Action
 | **C** | Control -- goal-directed decision-making with persistent memory | `agents/agent_c.py` |
 | **D** | Meaning / Narrative -- semantic representation from events | `agents/agent_d.py`, `agents/agent_d_llm.py` |
 | **D-Interpreter** | Extended D with coded hint interpretation capability | `agents/agent_d_interpreter.py` |
-| **Shadow-D** | Forward-planning agent using B's model for multi-step lookahead | `agents/agent_shadow_d.py` |
+| **PlannerBC** | B→C planning extension: multi-step beam-search lookahead using B's forward model | `agents/planner_bc.py` |
 | **Deconstruct** | Deterministic translation of D-output into structured C-memory | `router/deconstruct.py` |
 | **Deconstruct-Plan** | Plan-to-C transfer (sets tie_break_preference) | `router/deconstruct_plan.py` |
-| **Router** | Activates D/Shadow-D on demand; manages 3D/4D/5D regime transitions | `router/router.py` |
+| **Router** | Activates D on demand; manages 3D/4D regime transitions; gates planner | `router/router.py` |
 
 ### Core Principle
 
@@ -76,7 +77,7 @@ Default (5x5): Agent starts at (0,0). Hidden true goal is randomly Goal A (4,4) 
 
 ## Validation Results
 
-The validation suite consists of 6 stages (Stufe 0-5), each testing increasingly specific DEF claims.
+The validation suite consists of 8 stages (Stufe 0-8), testing increasingly specific DEF and architecture claims.
 
 ### Stufe 0: Infrastructure
 
@@ -187,13 +188,13 @@ Coded hints replace direct goal IDs with directional/comparative clues at three 
 2. Performance gap grows with difficulty (easy +0.207 -> hard +0.240)
 3. D's interpretation creates genuine information asymmetry -- coded hints are opaque to `deconstruct_d_to_c`
 
-### Stufe 8: Shadow-D Forward Planning (5D Regime)
+### Stufe 8: B→C Planning Horizon Extension
 
-**DEF Claim**: Forward-planning via multi-step lookahead creates a new 5D regime with measurable advantage in obstacle-heavy environments.
+**Claim**: Extending C's 1-step lookahead to N-step beam search via B's forward model provides measurable advantage in obstacle-rich environments.
 
-Shadow-D uses B's forward model for beam-search planning (depth=5, width=8). It populates C's `tie_break_preference` -- the first component to actually use this mechanism.
+**Important framing**: This is a B↔C coupling extension (deepening the existing B→C pairing), NOT a new dimensional stream. PlannerBC uses B's `predict_next` for multi-step rollouts and feeds the result into C's `tie_break_preference` -- which C already reads (agent_c.py:90-98) but was never populated until now. The architecture demonstrates extensibility without modifying existing agents.
 
-| Level | 3D (nod) | 4D (ond_tb) | 5D | Shadow-only |
+| Level | 3D (nod) | 4D (ond_tb) | 3D+ (planned) | Planner-only |
 |-------|:---:|:---:|:---:|:---:|
 | 5x5_few_obs | 1.000 | 1.000 | 1.000 | 1.000 |
 | 10x10_medium_obs | 0.520 | 0.520 | **0.710** | 0.710 |
@@ -201,11 +202,11 @@ Shadow-D uses B's forward model for beam-search planning (depth=5, width=8). It 
 | 10x10_dynamic_obs | 0.720 | 0.720 | **0.860** | 0.860 |
 | 15x15_dense_obs | 0.150 | 0.150 | **0.370** | 0.370 |
 
-**All 5 DEF predictions PASS**:
-1. 5D > 4D on obstacle-heavy levels (+14% to +22% SR)
+**All 5 predictions PASS**:
+1. Planner > non-planner on obstacle-heavy levels (+14% to +22% SR)
 2. Performance gap grows with obstacle density (simple: +0% -> dense: +18%)
-3. Shadow-only > nod (planning helps without narrative, p=0.007 on 15x15)
-4. No 5D advantage on simple 5x5 (planning is overkill)
+3. Planner-only > nod (planning helps without narrative, p=0.007 on 15x15)
+4. No planner advantage on simple 5x5 (planning is overkill)
 5. Plan confidence inversely correlates with obstacle density (0.80 -> 0.48)
 
 ### Summary of DEF Claims Validated
@@ -220,7 +221,7 @@ Shadow-D uses B's forward model for beam-search planning (depth=5, width=8). It 
 | 4 | Router is efficient | D-call count comparison | **PASS** (88% fewer) |
 | 5 | Router = regime transition | Task difficulty scaling | **PASS** (4/4) |
 | 6 | D creates information advantage at ambiguity | Coded hints interpretation | **PASS** (3/3) |
-| 8 | Forward-planning = 5D regime advantage | Shadow-D beam search | **PASS** (5/5) |
+| 8 | Extended B→C lookahead helps in obstacle-rich tasks | PlannerBC beam search | **PASS** (5/5) |
 
 ## Running the Tests
 
@@ -264,8 +265,8 @@ python eval/run_regime_transition.py
 # Stufe 6: Semantic ambiguity (D's interpretation advantage)
 python eval/run_semantic_ambiguity.py
 
-# Stufe 8: Shadow-D forward planning (5D regime)
-python eval/run_shadow_planning.py
+# Stufe 8: B→C planning horizon extension
+python eval/run_planning_horizon.py
 ```
 
 ### Legacy Ablation Studies
@@ -288,14 +289,14 @@ agents/
   agent_d.py          # Stream D: Deterministic narrative
   agent_d_llm.py      # Stream D: LLM-backed narrative (Ollama/Mistral)
   agent_d_interpreter.py  # Stream D: Extended D with coded hint interpretation
-  agent_shadow_d.py   # Shadow-D: Forward-planning via beam search
+  planner_bc.py       # B→C planning extension: multi-step beam-search lookahead
 
 env/
   gridworld.py        # Parametrizable GridWorld (variable size, multi-goal, dynamic obstacles)
   coded_hints.py      # HintEncoder + CodedGridWorld wrapper for semantic ambiguity
 
 router/
-  router.py           # Router with regime logging (3D/4D/5D transitions)
+  router.py           # Router with regime logging (3D/3D+/4D transitions)
   deconstruct.py      # D->C knowledge transfer (multi-goal support)
   deconstruct_plan.py # Plan->C transfer (tie_break_preference)
 
@@ -319,7 +320,7 @@ eval/
   run_drift_test.py                     # Stufe 4: Drift & deconstruction
   run_regime_transition.py              # Stufe 5: Regime transitions
   run_semantic_ambiguity.py             # Stufe 6: Semantic ambiguity (D's value)
-  run_shadow_planning.py                # Stufe 8: Shadow-D planning (5D regime)
+  run_planning_horizon.py               # Stufe 8: B→C planning horizon extension
   run_ablation_hidden_goal.py           # Legacy: hidden goal ablation
   run_ablation_hidden_goal_A2.py        # Legacy: A2 knowledge acquisition
   run_ablation_hidden_goal_A2_llm_timing.py  # Legacy: LLM timing
