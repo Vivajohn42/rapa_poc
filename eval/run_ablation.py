@@ -14,6 +14,7 @@ from router.router import Router, RouterConfig
 from state.schema import ZC
 
 from eval.baselines import baseline_monolithic_policy
+from eval.metrics import compute_symmetry_metrics
 
 
 @dataclass
@@ -43,11 +44,6 @@ def run_episode_variant(variant: str, goal_mode: str, max_steps: int = 50) -> Ep
 
     zA0 = A.infer_zA(obs)
 
-    # Force one D activation at t=0 to store the hint into memory
-    D.observe_step(t=0, zA=zA0, action="none", reward=0.0, done=False)
-    zD0 = D.build_micro(goal_mode=goal_mode, goal_pos=(-1, -1), last_n=1)
-    zC = deconstruct_d_to_c(zC, zD0)
-
     stay_count = 0
     total_reward = 0.0
     done = False
@@ -74,12 +70,12 @@ def run_episode_variant(variant: str, goal_mode: str, max_steps: int = 50) -> Ep
     for t in range(max_steps):
         zA = A.infer_zA(obs)
 
-        if "target" in zC.memory:
-            C.goal.target = tuple(zC.memory["target"])
-
         if variant == "baseline_mono":
             action = baseline_monolithic_policy(zA, mode=goal_mode)
         else:
+            if "target" in zC.memory:
+                C.goal.target = tuple(zC.memory["target"])
+
             # modular action choice
             if use_tie_break:
                 action, scored = C.choose_action(zA, B.predict_next, memory=zC.memory, tie_break_delta=0.25)
@@ -167,7 +163,57 @@ def run_batch(n: int = 50, out_csv: str = "runs/ablation_results.csv"):
             print(f"{v:14s} {g:5s}  sr={sr:.2f}  steps={ms:.1f}  stay={mst:.2f}  dtrig={mdt:.1f}")
 
 
+def run_symmetry_check(n_states: int = 20):
+    """
+    Post-hoc symmetry validation: sample random grid states
+    and verify that seek/avoid scores are proper negations.
+    Uses metrics.py functions that were previously unused.
+    """
+    import random
+    from eval.stats import confidence_interval_95
+
+    B = AgentB()
+
+    neg_errors = []
+    inv_scores = []
+    flip_count = 0
+    ab_valid_count = 0
+
+    rng = random.Random(0)
+    target = (4, 4)
+
+    for _ in range(n_states):
+        pos = (rng.randint(0, 4), rng.randint(0, 4))
+        if pos in [(2, 2)]:  # skip obstacle
+            continue
+
+        from state.schema import ZA as ZAModel
+        zA = ZAModel(width=5, height=5, agent_pos=pos, goal_pos=(-1, -1), obstacles=[(2, 2)])
+
+        C_seek = AgentC(goal=GoalSpec(mode="seek", target=target))
+        C_avoid = AgentC(goal=GoalSpec(mode="avoid", target=target))
+
+        m = compute_symmetry_metrics(zA, B.predict_next, C_seek.score_action, C_avoid.score_action)
+        neg_errors.append(m["score_negation_error"])
+        inv_scores.append(m["ranking_inversion_score"])
+        if m["top_action_flipped"]:
+            flip_count += 1
+        if m["ab_prediction_valid"]:
+            ab_valid_count += 1
+
+    n = len(neg_errors)
+    ne_m, ne_lo, ne_hi = confidence_interval_95(neg_errors)
+    inv_m, inv_lo, inv_hi = confidence_interval_95(inv_scores)
+
+    print(f"\n=== Seek/Avoid Symmetry Check ({n} states) ===")
+    print(f"  Score negation error: {ne_m:.4f} [{ne_lo:.4f}, {ne_hi:.4f}] (expect ~0)")
+    print(f"  Ranking inversion:    {inv_m:.4f} [{inv_lo:.4f}, {inv_hi:.4f}] (expect ~1)")
+    print(f"  Top action flipped:   {flip_count}/{n} = {flip_count/n:.2f}")
+    print(f"  B predictions valid:  {ab_valid_count}/{n} = {ab_valid_count/n:.2f}")
+
+
 if __name__ == "__main__":
     run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     out = f"runs/ablation_{run_id}.csv"
     run_batch(n=50, out_csv=out)
+    run_symmetry_check(n_states=50)

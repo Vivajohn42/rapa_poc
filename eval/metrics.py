@@ -1,7 +1,61 @@
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Any
 from state.schema import ZA
 
 ACTIONS = ("up", "down", "left", "right")
+
+
+def compute_symmetry_metrics(
+    zA: ZA,
+    predict_next_fn,
+    score_action_seek_fn,
+    score_action_avoid_fn,
+) -> Dict[str, Any]:
+    """
+    Compute seek/avoid symmetry metrics for a single state.
+
+    Args:
+        zA: Current observation state
+        predict_next_fn: AgentB.predict_next (callable)
+        score_action_seek_fn: AgentC.score_action with mode=seek (callable(zA, zA_next) -> float)
+        score_action_avoid_fn: AgentC.score_action with mode=avoid (callable(zA, zA_next) -> float)
+
+    Returns dict with:
+        - score_negation_error: avg |seek_score + avoid_score| (expect ~0)
+        - ranking_inversion_score: how perfectly avoid reverses seek ranking (expect 1.0)
+        - top_action_flipped: bool, whether top seek != top avoid
+        - ab_prediction_valid: bool, whether all B predictions are within grid
+    """
+    scored_seek = []
+    scored_avoid = []
+    ab_valid = True
+
+    for a in ACTIONS:
+        zA_next = predict_next_fn(zA, a)
+
+        x, y = zA_next.agent_pos
+        if not (0 <= x < zA.width and 0 <= y < zA.height):
+            ab_valid = False
+
+        s_seek = score_action_seek_fn(zA, zA_next)
+        s_avoid = score_action_avoid_fn(zA, zA_next)
+        scored_seek.append((a, s_seek))
+        scored_avoid.append((a, s_avoid))
+
+    neg_err = score_negation_error(scored_seek, scored_avoid)
+
+    rank_seek = ranking_from_scored(sorted(scored_seek, key=lambda x: x[1], reverse=True))
+    rank_avoid = ranking_from_scored(sorted(scored_avoid, key=lambda x: x[1], reverse=True))
+    inv_score = ranking_inversion_score(rank_seek, rank_avoid)
+
+    top_seek = sorted(scored_seek, key=lambda x: x[1], reverse=True)[0][0]
+    top_avoid = sorted(scored_avoid, key=lambda x: x[1], reverse=True)[0][0]
+
+    return {
+        "score_negation_error": neg_err,
+        "ranking_inversion_score": inv_score,
+        "top_action_flipped": top_seek != top_avoid,
+        "ab_prediction_valid": ab_valid,
+    }
 
 
 def ab_identity_check(zA: ZA, predict_next_fn) -> Dict[str, Tuple[Tuple[int,int], Tuple[int,int]]]:
