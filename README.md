@@ -34,6 +34,7 @@ A (Perception) --> B (Dynamics) --> C (Valence/Control) --> Action
 | **C** | Control -- goal-directed decision-making with persistent memory | `agents/agent_c.py` |
 | **D** | Meaning / Narrative -- semantic representation from events | `agents/agent_d.py`, `agents/agent_d_llm.py` |
 | **D-Interpreter** | Extended D with coded hint interpretation capability | `agents/agent_d_interpreter.py` |
+| **D-LLM-Interpreter** | LLM narrative + deterministic coded hint interpretation | `agents/agent_d_llm_interpreter.py` |
 | **PlannerBC** | B→C planning extension: multi-step beam-search lookahead using B's forward model | `agents/planner_bc.py` |
 | **Deconstruct** | Deterministic translation of D-output into structured C-memory | `router/deconstruct.py` |
 | **Deconstruct-Plan** | Plan-to-C transfer (sets tie_break_preference) | `router/deconstruct_plan.py` |
@@ -188,6 +189,44 @@ Coded hints replace direct goal IDs with directional/comparative clues at three 
 2. Performance gap grows with difficulty (easy +0.207 -> hard +0.240)
 3. D's interpretation creates genuine information asymmetry -- coded hints are opaque to `deconstruct_d_to_c`
 
+### Stufe 6-LLM: Architecture Robustness with Stochastic Narrative
+
+**Claim**: Replacing deterministic narrative generation with LLM-backed narrative does not disrupt the deterministic hint-interpretation pipeline.
+
+**Important framing**: This is a **robustness test**, not a capability test. Hint interpretation remains fully deterministic (HintEncoder.decode) regardless of whether the narrative is template-generated or LLM-generated. The question: does LLM variability in narrative generation disrupt the deterministic hint-decoding pipeline?
+
+Tested with Mistral 7B (`mistral:latest`) vs deterministic control, n=5 per combination, 9 levels x 5 variants.
+
+#### Core Robustness Result
+
+| Variant | Deterministic SR | LLM SR | Delta | p-value |
+|---------|:---:|:---:|:---:|:---:|
+| modular_ond_interp | 0.467 | 0.400 | -0.067 | ns |
+| modular_ond_tb_interp | 0.467 | 0.400 | -0.067 | ns |
+
+No significant difference -- stochastic narrative does not disrupt the pipeline.
+
+#### Hint Interpretation (the key isolation test)
+
+| Model | Hints | Interpreted | Rate | Format Fallback |
+|-------|:---:|:---:|:---:|:---:|
+| deterministic | 72 | 72 | **100%** | 0% |
+| mistral:latest | 60 | 60 | **100%** | 0% |
+| no-D variants | 90 | 0 | 0% | N/A |
+
+Interpretation is deterministic and model-independent -- exactly as the architecture predicts.
+
+#### Narrative Quality Signal
+
+LLM narrative slightly reduces SR on 10x10_4g configs (-0.067), likely due to LLM call latency causing more timeouts on larger grids. The LLM mentions coded hint content in 67% of episodes but never contradicts the hint direction.
+
+**All 5 DEF predictions PASS**:
+1. Pipeline robustness: LLM-D SR within 6.7% of deterministic-D (not significant)
+2. Interpretation isolation: 100% hint interpretation for all models
+3. Format-fallback isolation: 0% fallback (Mistral 7B perfect format compliance)
+4. D > no-D holds model-independently (deterministic +0.200, LLM +0.133)
+5. Narrative quality: LLM slightly worse (-0.067), informational only
+
 ### Stufe 7: LLM-D Multi-Model Validation
 
 **DEF Claim**: Replacing deterministic D with LLM-backed D preserves architecture properties. The router reacts to C's uncertainty (not D's output quality), so regime distributions should be model-independent.
@@ -257,6 +296,7 @@ Tested with Mistral 7B (`mistral:latest`) vs deterministic control. Multi-model 
 | 4 | Router is efficient | D-call count comparison | **PASS** (88% fewer) |
 | 5 | Router = regime transition | Task difficulty scaling | **PASS** (4/4) |
 | 6 | D creates information advantage at ambiguity | Coded hints interpretation | **PASS** (3/3) |
+| 6-LLM | Stochastic narrative doesn't disrupt hint pipeline | LLM robustness test | **PASS** (5/5) |
 | 7 | LLM-D preserves architecture properties | Multi-model drift + regime | **PASS** (8/8) |
 | 8 | Extended B→C lookahead helps in obstacle-rich tasks | PlannerBC beam search | **PASS** (5/5) |
 
@@ -303,6 +343,11 @@ python eval/run_regime_transition.py
 # Stufe 6: Semantic ambiguity (D's interpretation advantage)
 python eval/run_semantic_ambiguity.py
 
+# Stufe 6-LLM: Architecture robustness with stochastic narrative (requires Ollama)
+python -m eval.run_llm_semantic_ambiguity                          # all available models
+python -m eval.run_llm_semantic_ambiguity --model mistral:latest   # single model
+python -m eval.run_llm_semantic_ambiguity --n 5 --max-steps 50     # quick test
+
 # Stufe 7: LLM-D multi-model validation (requires Ollama)
 python -m eval.run_llm_drift                          # 7a: all available models
 python -m eval.run_llm_drift --model mistral:latest   # 7a: single model
@@ -333,6 +378,7 @@ agents/
   agent_d.py          # Stream D: Deterministic narrative
   agent_d_llm.py      # Stream D: LLM-backed narrative (Ollama/Mistral)
   agent_d_interpreter.py  # Stream D: Extended D with coded hint interpretation
+  agent_d_llm_interpreter.py  # Stream D: LLM narrative + deterministic hint interpretation
   planner_bc.py       # B→C planning extension: multi-step beam-search lookahead
 
 env/
@@ -364,6 +410,7 @@ eval/
   run_drift_test.py                     # Stufe 4: Drift & deconstruction
   run_regime_transition.py              # Stufe 5: Regime transitions
   run_semantic_ambiguity.py             # Stufe 6: Semantic ambiguity (D's value)
+  run_llm_semantic_ambiguity.py         # Stufe 6-LLM: Architecture robustness (multi-model)
   run_llm_drift.py                      # Stufe 7a: LLM-D drift (multi-model)
   run_llm_regime.py                     # Stufe 7b: LLM-D regime transition (multi-model)
   llm_utils.py                          # Ollama checks, model discovery, timing

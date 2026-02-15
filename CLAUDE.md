@@ -25,6 +25,11 @@ python eval/run_regime_transition.py       # Stufe 5: Regime transitions
 python eval/run_semantic_ambiguity.py      # Stufe 6: Semantic ambiguity (D's value)
 python eval/run_planning_horizon.py         # Stufe 8: B→C planning horizon extension
 
+# Stufe 6-LLM: Architecture robustness with stochastic narrative (requires Ollama)
+python -m eval.run_llm_semantic_ambiguity                          # all available models
+python -m eval.run_llm_semantic_ambiguity --model mistral:latest   # single model
+python -m eval.run_llm_semantic_ambiguity --n 5 --max-steps 50     # quick test
+
 # Stufe 7: LLM-D multi-model validation (requires Ollama)
 python -m eval.run_llm_drift                          # 7a: all available models
 python -m eval.run_llm_drift --model mistral:latest   # 7a: single model
@@ -56,6 +61,7 @@ The agents form a perception->prediction->valuation->narrative+planning pipeline
 - **Agent C** (`agents/agent_c.py`) -- Valence/Goals. Scores actions via Manhattan distance in `seek` or `avoid` mode. Supports tie-breaking via persistent memory from D and PlannerBC.
 - **Agent D** (`agents/agent_d.py`, `agents/agent_d_llm.py`) -- Narrative. Meaning extraction from recent events. Has both deterministic and LLM-backed (Ollama/Mistral) implementations.
 - **Agent D-Interpreter** (`agents/agent_d_interpreter.py`) -- Extended D with coded hint interpretation capability.
+- **Agent D-LLM-Interpreter** (`agents/agent_d_llm_interpreter.py`) -- LLM narrative + deterministic HintEncoder for coded hint interpretation.
 - **PlannerBC** (`agents/planner_bc.py`) -- B→C planning extension. Uses B's forward model for multi-step beam-search lookahead, feeding results into C's tie_break_preference. Not a new D-agent — deepens the existing B↔C coupling.
 
 ### Shared State Schemas (`state/schema.py`)
@@ -83,7 +89,7 @@ Parametrizable gridworld supporting variable size (5x5 to 15x15+), multiple cand
 - `metrics.py` -- Scoring and symmetry metrics
 - `drift_metrics.py` -- Tag flip rate, narrative similarity, windowed stability
 - `llm_utils.py` -- Ollama availability checks, model discovery, timed LLM calls
-- Validation scripts: `run_valence_swap.py`, `run_stream_isolation.py`, `run_complexity_scaling.py`, `run_drift_test.py`, `run_regime_transition.py`, `run_semantic_ambiguity.py`, `run_planning_horizon.py`, `run_llm_drift.py`, `run_llm_regime.py`
+- Validation scripts: `run_valence_swap.py`, `run_stream_isolation.py`, `run_complexity_scaling.py`, `run_drift_test.py`, `run_regime_transition.py`, `run_semantic_ambiguity.py`, `run_llm_semantic_ambiguity.py`, `run_planning_horizon.py`, `run_llm_drift.py`, `run_llm_regime.py`
 
 ## Key Design Decisions
 
