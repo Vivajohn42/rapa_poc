@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "DEF / RAPA Modular Cognitive Architecture MVP"
+authors:
+  - family-names: "Buholzer"
+    given-names: "Hans"
+version: "1.0.0"
+date-released: 2026-01-01
+url: "https://github.com/Vivajohn42/rapa_poc"
+license: "Apache-2.0"
