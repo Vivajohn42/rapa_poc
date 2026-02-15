@@ -25,6 +25,12 @@ python eval/run_regime_transition.py       # Stufe 5: Regime transitions
 python eval/run_semantic_ambiguity.py      # Stufe 6: Semantic ambiguity (D's value)
 python eval/run_planning_horizon.py         # Stufe 8: B→C planning horizon extension
 
+# Stufe 7: LLM-D multi-model validation (requires Ollama)
+python -m eval.run_llm_drift                          # 7a: all available models
+python -m eval.run_llm_drift --model mistral:latest   # 7a: single model
+python -m eval.run_llm_regime                         # 7b: all available models
+python -m eval.run_llm_regime --model phi3:mini       # 7b: single model
+
 # Legacy ablation studies
 python eval/run_ablation_hidden_goal.py
 python eval/run_ablation_hidden_goal_A2.py
@@ -36,7 +42,8 @@ No formal test suite, linter, or build system is configured. Validation is empir
 ## Prerequisites
 
 - Python 3.10+ with `pydantic`, `requests`, `tqdm`
-- **Ollama** running locally (`ollama serve`) with `mistral:latest` pulled, for LLM-backed Agent D
+- **Ollama** running locally (`ollama serve`) for LLM-backed Agent D
+- Supported models: `phi3:mini` (3.8B), `mistral:latest` (7B), `qwen2.5:3b` (3B), `gemma2:2b` (2B)
 
 ## Architecture
 
@@ -75,7 +82,8 @@ Parametrizable gridworld supporting variable size (5x5 to 15x15+), multiple cand
 - `runner.py` -- Shared batch test runner with CSV output and aggregation
 - `metrics.py` -- Scoring and symmetry metrics
 - `drift_metrics.py` -- Tag flip rate, narrative similarity, windowed stability
-- Validation scripts: `run_valence_swap.py`, `run_stream_isolation.py`, `run_complexity_scaling.py`, `run_drift_test.py`, `run_regime_transition.py`, `run_semantic_ambiguity.py`, `run_planning_horizon.py`
+- `llm_utils.py` -- Ollama availability checks, model discovery, timed LLM calls
+- Validation scripts: `run_valence_swap.py`, `run_stream_isolation.py`, `run_complexity_scaling.py`, `run_drift_test.py`, `run_regime_transition.py`, `run_semantic_ambiguity.py`, `run_planning_horizon.py`, `run_llm_drift.py`, `run_llm_regime.py`
 
 ## Key Design Decisions
 

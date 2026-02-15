@@ -2,7 +2,7 @@
 
 ## Overview
 
-This repository contains a minimal working prototype (MVP) of the **DEF/RAPA** modular cognitive architecture, together with a comprehensive **8-stage validation suite** (Stufe 0-8) that empirically tests the core claims of the Dimensional Emergence Framework (DEF).
+This repository contains a minimal working prototype (MVP) of the **DEF/RAPA** modular cognitive architecture, together with a comprehensive **9-stage validation suite** (Stufe 0-8) that empirically tests the core claims of the Dimensional Emergence Framework (DEF).
 
 The system demonstrates how transient perceptual information can be transformed into persistent actionable knowledge through:
 
@@ -77,7 +77,7 @@ Default (5x5): Agent starts at (0,0). Hidden true goal is randomly Goal A (4,4) 
 
 ## Validation Results
 
-The validation suite consists of 8 stages (Stufe 0-8), testing increasingly specific DEF and architecture claims.
+The validation suite consists of 9 stages (Stufe 0-8), testing increasingly specific DEF and architecture claims.
 
 ### Stufe 0: Infrastructure
 
@@ -188,6 +188,42 @@ Coded hints replace direct goal IDs with directional/comparative clues at three 
 2. Performance gap grows with difficulty (easy +0.207 -> hard +0.240)
 3. D's interpretation creates genuine information asymmetry -- coded hints are opaque to `deconstruct_d_to_c`
 
+### Stufe 7: LLM-D Multi-Model Validation
+
+**DEF Claim**: Replacing deterministic D with LLM-backed D preserves architecture properties. The router reacts to C's uncertainty (not D's output quality), so regime distributions should be model-independent.
+
+Tested with Mistral 7B (`mistral:latest`) vs deterministic control. Multi-model comparison (Phi-3, Gemma 2, Qwen 2.5) supported via CLI.
+
+#### 7a: Drift with LLM-D
+
+| Model | Variant | D-calls | Flip Rate | Tag Stability | Latency | Fallback |
+|-------|---------|---------|-----------|---------------|---------|----------|
+| deterministic | d_always_no_decon | 42 | 0.021 | 0.971 | 0ms | 0% |
+| deterministic | d_routed | 5 | 0.017 | 0.967 | 0ms | 0% |
+| mistral:latest | d_always_no_decon | 42 | **0.802** | 0.010 | 12,881ms | 0% |
+| mistral:latest | d_routed | 5 | 0.332 | **0.469** | 9,758ms | 0% |
+
+**All 5 DEF predictions PASS**:
+1. LLM-D shows 38x higher tag flip rate than deterministic D (real semantic variability)
+2. Deconstruction stabilizes LLM-D more strongly (stability delta +0.049 vs +0.000)
+3. Router achieves 88% fewer D-calls; LLM routed stability (0.47) >> d_always (0.01)
+4. Mistral 7B: 0% format fallback rate (perfect NARRATIVE/TAGS compliance)
+5. Hint recognition works by design (deterministic tag injection)
+
+#### 7b: Regime Transition with LLM-D
+
+| Model | Task | %3D | %4D | D-Triggers | Total Latency | SR |
+|-------|------|-----|-----|------------|---------------|-----|
+| deterministic | 2D | 95.0% | 5.0% | 0.4 | 0ms | 1.000 |
+| deterministic | 4D | 87.7% | 12.3% | 12.3 | 0ms | 0.000 |
+| mistral:latest | 2D | 95.0% | 5.0% | 0.4 | 4,370ms | 1.000 |
+| mistral:latest | 4D | 87.7% | 12.3% | 12.3 | 165,459ms | 0.000 |
+
+**All 3 DEF predictions PASS**:
+1. **Regime distributions identical** — router reacts to C's uncertainty, not D's quality
+2. Router cost savings: 4D tasks use 37.9x more D-call time than 2D (165s vs 4s)
+3. Hint processing works via deterministic injection (model-independent)
+
 ### Stufe 8: B→C Planning Horizon Extension
 
 **Claim**: Extending C's 1-step lookahead to N-step beam search via B's forward model provides measurable advantage in obstacle-rich environments.
@@ -221,6 +257,7 @@ Coded hints replace direct goal IDs with directional/comparative clues at three 
 | 4 | Router is efficient | D-call count comparison | **PASS** (88% fewer) |
 | 5 | Router = regime transition | Task difficulty scaling | **PASS** (4/4) |
 | 6 | D creates information advantage at ambiguity | Coded hints interpretation | **PASS** (3/3) |
+| 7 | LLM-D preserves architecture properties | Multi-model drift + regime | **PASS** (8/8) |
 | 8 | Extended B→C lookahead helps in obstacle-rich tasks | PlannerBC beam search | **PASS** (5/5) |
 
 ## Running the Tests
@@ -229,7 +266,8 @@ Coded hints replace direct goal IDs with directional/comparative clues at three 
 
 - Python 3.10+
 - `pydantic`, `requests`, `tqdm`
-- **Ollama** running locally (`ollama serve`) with `mistral:latest` pulled (only for LLM-backed D)
+- **Ollama** running locally (`ollama serve`) for LLM-backed D (Stufe 7)
+- Supported models: `phi3:mini` (3.8B), `mistral:latest` (7B), `qwen2.5:3b` (3B), `gemma2:2b` (2B)
 
 ```bash
 pip install pydantic requests tqdm
@@ -264,6 +302,12 @@ python eval/run_regime_transition.py
 
 # Stufe 6: Semantic ambiguity (D's interpretation advantage)
 python eval/run_semantic_ambiguity.py
+
+# Stufe 7: LLM-D multi-model validation (requires Ollama)
+python -m eval.run_llm_drift                          # 7a: all available models
+python -m eval.run_llm_drift --model mistral:latest   # 7a: single model
+python -m eval.run_llm_regime                         # 7b: all available models
+python -m eval.run_llm_regime --model mistral:latest  # 7b: single model
 
 # Stufe 8: B→C planning horizon extension
 python eval/run_planning_horizon.py
@@ -320,6 +364,9 @@ eval/
   run_drift_test.py                     # Stufe 4: Drift & deconstruction
   run_regime_transition.py              # Stufe 5: Regime transitions
   run_semantic_ambiguity.py             # Stufe 6: Semantic ambiguity (D's value)
+  run_llm_drift.py                      # Stufe 7a: LLM-D drift (multi-model)
+  run_llm_regime.py                     # Stufe 7b: LLM-D regime transition (multi-model)
+  llm_utils.py                          # Ollama checks, model discovery, timing
   run_planning_horizon.py               # Stufe 8: B→C planning horizon extension
   run_ablation_hidden_goal.py           # Legacy: hidden goal ablation
   run_ablation_hidden_goal_A2.py        # Legacy: A2 knowledge acquisition
