@@ -63,7 +63,7 @@ class AgentDLLM:
             [{"role": "system", "content": system},
              {"role": "user", "content": user}],
             temperature=0.2,
-            max_tokens=160,
+            max_tokens=80,
         ).strip()
 
         narrative = ""
@@ -131,7 +131,7 @@ class AgentDLLM:
             [{"role": "system", "content": system},
              {"role": "user", "content": user}],
             temperature=0.2,
-            max_tokens=220,
+            max_tokens=120,
         ).strip()
 
         narrative = ""
