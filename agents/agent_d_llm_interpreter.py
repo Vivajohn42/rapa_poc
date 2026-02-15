@@ -16,7 +16,7 @@ from typing import Optional, Dict, Tuple, List
 from agents.agent_d_llm import AgentDLLM, Event
 from env.coded_hints import HintEncoder, EliminationEncoder
 from llm.provider import LLMProvider
-from state.schema import ZD
+from state.schema import ZA, ZD
 
 
 class AgentDLLMInterpreter(AgentDLLM):
@@ -76,6 +76,66 @@ class AgentDLLMInterpreter(AgentDLLM):
 
         decoded = self._elim_encoder.decode_elimination(coded_hint, self.difficulty)
         return decoded
+
+    def interpret_hint_only(self, zA_hint: ZA) -> Optional[ZD]:
+        """
+        Decode a coded hint deterministically WITHOUT making an LLM call.
+
+        This is the fast path for hint processing: only HintEncoder/
+        EliminationEncoder are used. No narrative is generated, no LLM
+        inference happens. Returns a minimal ZD with the decoded tag,
+        or None if the hint cannot be decoded.
+        """
+        if zA_hint.hint is None:
+            return None
+
+        hint = zA_hint.hint
+
+        # Direct hints (e.g. "A", "B") are handled by parent's
+        # deterministic tag injection in build_micro — skip here
+        if self._is_direct_hint(hint):
+            if hint.upper() in self.goal_map and len(hint) <= 2:
+                return ZD(
+                    narrative="hint_direct",
+                    meaning_tags=[f"hint:{hint.upper()}"],
+                    length_chars=11,
+                    grounding_violations=0,
+                )
+            if hint.startswith("not_"):
+                parts = hint[4:].split("_")
+                elim = [p.upper() for p in parts if p.upper() in self.goal_map]
+                if elim:
+                    tag = "not_" + "_".join(g.lower() for g in elim)
+                    return ZD(
+                        narrative="elimination_direct",
+                        meaning_tags=[tag],
+                        length_chars=19,
+                        grounding_violations=0,
+                    )
+            return None
+
+        # Try coded goal hint
+        goal_id = self.interpret_coded_hint(hint)
+        if goal_id is not None:
+            return ZD(
+                narrative="hint_decoded",
+                meaning_tags=[f"hint:{goal_id.lower()}"],
+                length_chars=12,
+                grounding_violations=0,
+            )
+
+        # Try coded elimination hint
+        eliminated = self.interpret_coded_elimination(hint)
+        if eliminated:
+            tag = "not_" + "_".join(g.lower() for g in eliminated)
+            return ZD(
+                narrative="elimination_decoded",
+                meaning_tags=[tag],
+                length_chars=19,
+                grounding_violations=0,
+            )
+
+        return None
 
     def build_micro(self, goal_mode: str, goal_pos=None, last_n: int = 6) -> ZD:
         """

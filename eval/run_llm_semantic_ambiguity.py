@@ -375,45 +375,30 @@ def run_episode(
             stay_count += 1
 
         # ── Hint Processing ──
+        # Uses interpret_hint_only() — deterministic, NO LLM call.
+        # The LLM is only invoked via router-gated build_micro() below.
         if zA_next.hint is not None:
             hints_collected += 1
 
             if use_d and D is not None:
-                # D-interpreter processes the coded hint
-                D.observe_step(t=t, zA=zA_next, action="hint", reward=0.0, done=False)
+                # Fast path: deterministic hint decoding (no LLM call)
+                zD_hint = D.interpret_hint_only(zA_next)
 
-                start_t = time.perf_counter()
-                zD_hint = D.build_micro(goal_mode=goal_mode, goal_pos=(-1, -1), last_n=1)
-                elapsed_ms = (time.perf_counter() - start_t) * 1000.0
-                d_latencies.append(elapsed_ms)
-                total_d_calls += 1
+                if zD_hint is not None:
+                    # Check if D successfully interpreted the hint
+                    for tag in zD_hint.meaning_tags:
+                        tag_lower = tag.lower()
+                        if (tag_lower.startswith("hint:") and
+                                tag_lower[5:] in [g.lower() for g in goal_map]):
+                            hints_interpreted += 1
+                            break
+                        if tag_lower.startswith("not_"):
+                            hints_interpreted += 1
+                            break
 
-                if "llm_format_fallback" in zD_hint.meaning_tags:
-                    format_fallbacks += 1
-
-                # Check if D successfully interpreted the hint
-                for tag in zD_hint.meaning_tags:
-                    tag_lower = tag.lower()
-                    if (tag_lower.startswith("hint:") and
-                            tag_lower[5:] in [g.lower() for g in goal_map]):
-                        hints_interpreted += 1
-                        break
-                    if tag_lower.startswith("not_"):
-                        hints_interpreted += 1
-                        break
-
-                # Check narrative vs hint (LLM-specific metrics)
-                if model != "deterministic":
-                    coded_hint_str = zA_next.hint or ""
-                    if _check_narrative_hint_mention(zD_hint.narrative, coded_hint_str):
-                        narrative_mentions_hint = True
-                    tg_id = true_goal_id
-                    if _check_narrative_contradiction(zD_hint.narrative, coded_hint_str, tg_id, goal_map):
-                        narrative_contradicts_hint = True
-
-                if zC is not None:
-                    zC = deconstruct_d_to_c(zC, zD_hint, goal_map=goal_map)
-                d_triggers += 1
+                    if zC is not None:
+                        zC = deconstruct_d_to_c(zC, zD_hint, goal_map=goal_map)
+                    d_triggers += 1
 
             elif zC is not None:
                 # No-D variant: pass coded hint directly (won't match)
@@ -446,6 +431,14 @@ def run_episode(
 
                 if "llm_format_fallback" in zD.meaning_tags:
                     format_fallbacks += 1
+
+                # Narrative quality analysis (LLM-specific)
+                if model != "deterministic" and zA_next.hint is not None:
+                    coded_hint_str = zA_next.hint or ""
+                    if _check_narrative_hint_mention(zD.narrative, coded_hint_str):
+                        narrative_mentions_hint = True
+                    if _check_narrative_contradiction(zD.narrative, coded_hint_str, true_goal_id, goal_map):
+                        narrative_contradicts_hint = True
 
                 if zC is not None:
                     zC = deconstruct_d_to_c(zC, zD, goal_map=goal_map)
