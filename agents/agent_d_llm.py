@@ -27,6 +27,7 @@ class AgentDLLM:
     def __init__(self, llm: LLMProvider):
         self.llm = llm
         self.events: List[Event] = []
+        self.seen_positions = set()
 
     def observe_step(self, t: int, zA: ZA, action: str, reward: float, done: bool):
         self.events.append(Event(
@@ -37,6 +38,7 @@ class AgentDLLM:
             done=done,
             hint=zA.hint
         ))
+        self.seen_positions.add(zA.agent_pos)
 
     def build_micro(self, goal_mode: str, goal_pos=None, last_n: int = 6) -> ZD:
         # goal_pos is accepted for drop-in compatibility with AgentD (can be None / ignored)

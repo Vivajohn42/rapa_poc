@@ -24,6 +24,7 @@ from kernel.types import MvpLoopGain
 KNOWN_TAG_PREFIXES = frozenset({
     "goal:", "hint:", "target:", "micro", "success", "no_success",
     "short_episode", "long_episode", "stability:", "not_", "empty",
+    "clue_collected:", "candidates:",  # TextWorld D tags
 })
 
 
@@ -62,6 +63,7 @@ class MvpLoopGainTracker:
         tick_id: int = 0,
         predict_next_fn=None,        # B.predict_next (for g_BA walkability)
         d_seen_positions: Optional[set] = None,  # D's seen_positions (for g_AD)
+        has_agent_d: bool = True,    # Whether D agent exists (False → no D→C path)
     ) -> MvpLoopGain:
         """Compute all four gains for this tick."""
 
@@ -84,9 +86,16 @@ class MvpLoopGainTracker:
         fresh_g_DC = None
         if gD == 1 and zD is not None:
             fresh_g_DC = self._compute_g_DC(zC, zD, decon_fired)
+        elif has_agent_d and "target" in zC.memory:
+            # Target in memory (possibly via hint-capture path) — D→C coupling realized
+            fresh_g_DC = 1.0
         if fresh_g_DC is not None:
             self.g_DC = fresh_g_DC
+        elif not has_agent_d:
+            # No D agent at all → decay toward 0 (no D→C coupling possible)
+            self.g_DC = self._carry_forward(self.g_DC, default=0.0)
         else:
+            # D exists but gD=0 this tick → carry forward
             self.g_DC = self._carry_forward(self.g_DC)
 
         # --- g_AD: when D is running ---
@@ -97,8 +106,11 @@ class MvpLoopGainTracker:
             )
         if fresh_g_AD is not None:
             self.g_AD = fresh_g_AD
+        elif not has_agent_d:
+            # No D agent at all → decay toward 0 (no A→D resonance possible)
+            self.g_AD = self._carry_forward(self.g_AD, default=0.0)
         else:
-            # Deterministic D stays at 1.0, LLM D decays
+            # D exists but gD=0 → deterministic stays at 1.0, LLM decays
             self.g_AD = self._carry_forward(self.g_AD, default=1.0)
 
         # --- Composite G ---
@@ -176,7 +188,11 @@ class MvpLoopGainTracker:
         if scored is None or predict_next_fn is None:
             return None
 
-        ACTIONS = ["up", "down", "left", "right"]
+        # Dynamic actions from scored list (supports TextWorld + GridWorld)
+        if scored:
+            ACTIONS = [a for a, _ in scored]
+        else:
+            ACTIONS = ["up", "down", "left", "right"]  # GridWorld fallback
 
         # B-only scores: 1.0 if action moves, 0.0 if stays
         b_vec = []
@@ -201,9 +217,9 @@ class MvpLoopGainTracker:
         """Salience-to-Valence: How much does D influence C?
 
         Staged scoring:
-        - 1.0: waypoint/target found in C's memory (D contributed actionable info)
-        - 0.8: deconstruction fired (D→C pipeline active)
-        - 0.5: D produced tags but no structural change
+        - 1.0: target found in C's memory (D contributed actionable info)
+        - 0.8: deconstruction fired (D->C pipeline active) OR candidates narrowing
+        - 0.5: D produced tags but no structural change yet
         - 0.3: D produced nothing useful
         """
         if zD is None:
@@ -212,10 +228,17 @@ class MvpLoopGainTracker:
         tags = list(zD.meaning_tags)
         target_in_memory = "target" in zC.memory
 
-        if target_in_memory and decon_fired:
+        # Check if D's synthesis narrowed candidates (from tags)
+        has_target_tag = any(t.startswith("target:") for t in tags)
+        candidates_narrowing = any(t.startswith("candidates:") for t in tags)
+
+        if target_in_memory:
+            # Target identified — D→C coupling is fully realized
             return 1.0
-        elif decon_fired:
+        elif decon_fired or has_target_tag:
             return 0.8
+        elif candidates_narrowing and len(tags) > 2:
+            return 0.6
         elif len(tags) > 1:  # More than just "empty"
             return 0.5
         else:

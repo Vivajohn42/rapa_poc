@@ -15,14 +15,15 @@ from __future__ import annotations
 from typing import Dict, Any, List, Optional, Tuple
 
 from state.schema import ZC, ZD
-from router.deconstruct import deconstruct_d_to_c
+from router.deconstruct import deconstruct_d_to_c as _default_deconstruct_fn
 
 
 class MvpMemoryManager:
     """L3 persistent memory with D→C→B deconstruction pipeline."""
 
-    def __init__(self, max_entries: int = 100):
+    def __init__(self, max_entries: int = 100, deconstruct_fn=None):
         self.max_entries = max_entries
+        self._deconstruct_fn = deconstruct_fn or _default_deconstruct_fn
         self.L3: Dict[str, Any] = {
             "c_long": [],      # consolidated C summaries from D
             "b_priors": [],    # tie-break priors pushed to B
@@ -46,7 +47,7 @@ class MvpMemoryManager:
             Updated ZC with new memory entries.
         """
         # --- 1. D→C ---
-        zC_new = deconstruct_d_to_c(zC, zD, goal_map=goal_map)
+        zC_new = self._deconstruct_fn(zC, zD, goal_map=goal_map)
 
         # --- 2. Store in L3.c_long ---
         summary = {

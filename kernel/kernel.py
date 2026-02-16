@@ -73,6 +73,7 @@ class MvpKernel:
         stuck_window: int = 4,
         tie_break_delta: float = 0.25,
         deconstruct_cooldown_ticks: int = 3,
+        deconstruct_fn=None,
     ):
         self.agent_a = agent_a
         self.agent_b = agent_b
@@ -100,7 +101,7 @@ class MvpKernel:
         self._closure = ClosureCore()
 
         # Memory manager (L3 persistent, survives episode resets)
-        self._memory = MvpMemoryManager()
+        self._memory = MvpMemoryManager(deconstruct_fn=deconstruct_fn)
 
         # Loop gain tracker (M4)
         self._loop_gain = MvpLoopGainTracker()
@@ -183,9 +184,8 @@ class MvpKernel:
                 goal_pos=(-1, -1),
                 last_n=1,
             )
-            from router.deconstruct import deconstruct_d_to_c
             old_target = zC.memory.get("target")
-            zC = deconstruct_d_to_c(zC, zD_hint, goal_map=self.goal_map)
+            zC = self._memory._deconstruct_fn(zC, zD_hint, goal_map=self.goal_map)
             zC.memory["episode_id"] = self._zC.memory.get("episode_id", "")
             new_target = zC.memory.get("target")
             self._hint_just_learned = (new_target != old_target and new_target is not None)
@@ -242,7 +242,10 @@ class MvpKernel:
                 memory=zC.memory,
                 tie_break_delta=self.tie_break_delta,
             )
-            self._last_decision_delta = scored[0][1] - scored[1][1]
+            if len(scored) >= 2:
+                self._last_decision_delta = scored[0][1] - scored[1][1]
+            else:
+                self._last_decision_delta = 0.0
         else:
             # AB only: use B's forward model with simple heuristic
             action = self._ab_only_action(zA)
@@ -303,6 +306,7 @@ class MvpKernel:
             tick_id=t,
             predict_next_fn=self.agent_b.predict_next,
             d_seen_positions=d_seen,
+            has_agent_d=(self.agent_d is not None),
         )
 
         return MvpTickResult(
