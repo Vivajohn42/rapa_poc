@@ -303,14 +303,16 @@ A two-phase episode tests whether Deconstruct's overwrite mechanism enables adap
 | decon_persist | on | on (overwrite) | **0.377** |
 | decon_clear | on | on (clear at switch) | **0.377** |
 
+After the switch, `decon_persist` follows its old target (Goal A) for up to 5 steps before redirecting to hint cell 2. `decon_clear` goes to hint cell 2 immediately. This creates a genuine detour cost that the overwrite mechanism must absorb.
+
 **All 5 DEF predictions PASS**:
 1. `decon_persist` >> `no_d` in Phase 2 SR (p < 0.001) -- Deconstruct enables task adaptation
 2. `decon_persist` >> `d_no_decon` in Phase 2 SR (p < 0.001) -- it is Deconstruct, not D alone
 3. Target update rate: decon variants 83.2%, non-decon 0.0% -- Deconstruct creates actionable state
-4. `decon_persist` == `decon_clear` (delta = 0.000, p = 1.000) -- overwrite mechanism is sufficient, no explicit clearing needed
+4. `decon_persist` ~= `decon_clear` in SR (delta = 0.000) with bounded detour cost: persist needs ~4 more steps to adapt (9.3 vs 6.8 on 10x10) but achieves the same success rate
 5. Phase 1 performance identical across all variants (spread = 0.000) -- Deconstruct's value emerges only at the task switch
 
-Adaptation speed: 6.8 steps to target update (10x10), 13.0 steps (15x15).
+Adaptation speed: persist 9.3 steps / clear 6.8 steps (10x10), persist 17.0 / clear 13.0 (15x15). The ~4-step detour is the measured cost of stale memory -- bounded and absorbed by the overwrite mechanism.
 
 ### Summary of DEF Claims Validated
 

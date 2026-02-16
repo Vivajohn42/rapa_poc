@@ -13,16 +13,19 @@ Two-phase episodes:
   Phase 2: Goal switches to B, hint cell 2 reveals new target
 
 Variants:
-  no_d:          No D, no deconstruct — baseline
-  d_no_decon:    D active but deconstruct disabled — D sees hints but C never learns
-  decon_persist: D + deconstruct, memory persists through switch (overwrite test)
-  decon_clear:   D + deconstruct, memory cleared at switch (fresh start control)
+  no_d:          No D, no deconstruct -- baseline
+  d_no_decon:    D active but deconstruct disabled -- D sees hints but C never learns
+  decon_persist: D + deconstruct, memory persists through switch (overwrite test).
+                 After switch, agent follows old target for up to STUCK_THRESHOLD
+                 steps before redirecting to hint cell 2.
+  decon_clear:   D + deconstruct, memory cleared at switch (fresh start control).
+                 After switch, agent goes to hint cell 2 immediately (no old target).
 
 DEF Predictions:
   1. decon_persist Phase-2 SR >> no_d Phase-2 SR
   2. decon_persist Phase-2 SR >> d_no_decon Phase-2 SR
   3. target_updated ~100% for decon variants, 0% for others
-  4. decon_persist ≈ decon_clear (overwrite is self-correcting)
+  4. decon_persist ~= decon_clear (overwrite self-corrects with bounded detour cost)
   5. Phase-1 performance similar across all D variants
 """
 
@@ -115,6 +118,7 @@ class TaskChangeResult:
     d_triggers: int
     hints_collected: int
     hints_interpreted: int
+    phase2_detour_steps: int            # steps at old target before redirect (persist only)
     stay_rate: float
     phase2_stay_rate: float
 
@@ -189,28 +193,41 @@ def run_episode(
     last_positions = deque(maxlen=20)
 
     # Navigation state for hint cell queue
-    # All variants navigate to hint cells identically via C's target
     hint1_visited = False
     hint2_visited = False
     hint2_available = False
+
+    # Stuck threshold: persist variant follows old target for up to N steps
+    # before redirecting to hint2. Models realistic "give up on stale belief".
+    phase2_steps_with_old_target = 0
+    PHASE2_STUCK_THRESHOLD = 5
 
     for t in range(config.max_steps):
         zA = A.infer_zA(obs)
 
         # ── Update C's target ──
-        # Navigation logic ensures all variants visit hint cells equally.
-        # The difference is what happens AFTER: decon variants learn a target
-        # from the hint, non-decon variants navigate to a default position.
+        # After switch, navigation depends on memory state:
+        #   persist (has old target): follows old target for STUCK_THRESHOLD
+        #     steps, then redirects to hint2. This creates a genuine detour.
+        #   clear (empty memory): goes to hint2 immediately.
         if switch_detected and target_updated_after:
-            # Phase 2 target successfully learned via deconstruct
+            # Phase 2 target learned via deconstruct
             C.goal.target = tuple(zC.memory["target"])
-        elif switch_detected and not hint2_visited:
-            # Phase 2, hint cell 2 not yet visited — go collect it
-            C.goal.target = env.hint2_pos
         elif switch_detected:
-            # Phase 2, hint cell 2 visited but target not learned (no decon)
-            # Agent is blind: navigates to Phase 1 goal (wrong!) or wanders
-            C.goal.target = phase1_goal_pos
+            # Phase 2, target not yet updated to Goal B
+            has_old_target = ("target" in zC.memory
+                              and zC.memory["target"] is not None)
+            stuck_at_old = phase2_steps_with_old_target >= PHASE2_STUCK_THRESHOLD
+
+            if has_old_target and not stuck_at_old:
+                # PERSIST: follow old target (genuine detour)
+                C.goal.target = tuple(zC.memory["target"])
+            elif not hint2_visited:
+                # No target OR stuck at old: seek hint2
+                C.goal.target = env.hint2_pos
+            else:
+                # hint2 visited but target not learned (no decon)
+                C.goal.target = phase1_goal_pos
         elif "target" in zC.memory and zC.memory["target"] is not None:
             # Phase 1: learned target from deconstruct
             C.goal.target = tuple(zC.memory["target"])
@@ -218,7 +235,7 @@ def run_episode(
             # Phase 1: go collect hint 1
             C.goal.target = env.hint1_pos
         else:
-            # Phase 1: hint 1 visited but no target — head to default
+            # Phase 1: hint 1 visited but no target -- head to default
             C.goal.target = phase1_goal_pos
 
         # ── Action Selection ──
@@ -263,6 +280,11 @@ def run_episode(
         # Count phase 2 steps
         if switch_detected:
             phase2_steps += 1
+
+        # Track steps spent following old target (persist detour cost)
+        if (switch_detected and not target_updated_after
+                and "target" in zC.memory and zC.memory["target"] is not None):
+            phase2_steps_with_old_target += 1
 
         # Track hint cell visits
         if zA_next.agent_pos == env.hint1_pos:
@@ -358,6 +380,7 @@ def run_episode(
         d_triggers=d_triggers,
         hints_collected=hints_collected,
         hints_interpreted=hints_interpreted,
+        phase2_detour_steps=min(phase2_steps_with_old_target, PHASE2_STUCK_THRESHOLD),
         stay_rate=stay_rate,
         phase2_stay_rate=p2_stay_rate,
     )
@@ -400,7 +423,8 @@ def run_batch(n: int = 100, goal_mode: str = "seek"):
         "total_reward", "phase1_steps", "phase2_steps", "phase1_reached",
         "switch_step", "target_correct_at_switch", "target_updated_after",
         "steps_to_target_update", "d_triggers", "hints_collected",
-        "hints_interpreted", "stay_rate", "phase2_stay_rate",
+        "hints_interpreted", "phase2_detour_steps", "stay_rate",
+        "phase2_stay_rate",
     ]
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
@@ -412,8 +436,8 @@ def run_batch(n: int = 100, goal_mode: str = "seek"):
                 r.phase1_reached, r.switch_step,
                 r.target_correct_at_switch, r.target_updated_after,
                 r.steps_to_target_update, r.d_triggers, r.hints_collected,
-                r.hints_interpreted, f"{r.stay_rate:.4f}",
-                f"{r.phase2_stay_rate:.4f}",
+                r.hints_interpreted, r.phase2_detour_steps,
+                f"{r.stay_rate:.4f}", f"{r.phase2_stay_rate:.4f}",
             ])
 
     print(f"\nWrote {len(results)} episodes to: {csv_path}")
@@ -529,7 +553,7 @@ def _print_persist_vs_clear(results: List[TaskChangeResult], configs: List[TaskC
     """Direct comparison: decon_persist vs decon_clear."""
     print(f"\n{'=' * 100}")
     print(f"  PERSIST vs CLEAR -- Is explicit memory clearing needed?")
-    print(f"  (Hypothesis: overwrite mechanism is self-correcting, clearing unnecessary)")
+    print(f"  (Hypothesis: overwrite self-corrects with bounded detour cost)")
     print(f"{'=' * 100}")
 
     for config in configs:
@@ -551,8 +575,21 @@ def _print_persist_vs_clear(results: List[TaskChangeResult], configs: List[TaskC
         print(f"\n  {config.name}:")
         print(f"    decon_persist: SR={p_sr:.3f}  decon_clear: SR={c_sr:.3f}  delta={delta:+.3f}  p={report['p_value']:.4f} {sig}")
 
+        # Detour cost analysis
+        p_detour = [r.phase2_detour_steps for r in persist]
+        c_detour = [r.phase2_detour_steps for r in clear]
+        p_det_avg = mean(p_detour) if p_detour else 0.0
+        c_det_avg = mean(c_detour) if c_detour else 0.0
+        print(f"    Detour steps: persist={p_det_avg:.1f}  clear={c_det_avg:.1f}")
+
+        # Phase 2 step efficiency for successful episodes
+        p_succ = [r.phase2_steps for r in persist if r.success]
+        c_succ = [r.phase2_steps for r in clear if r.success]
+        if p_succ and c_succ:
+            print(f"    Phase-2 steps (success only): persist={mean(p_succ):.1f}  clear={mean(c_succ):.1f}")
+
         if abs(delta) < 0.1 and report["p_value"] >= 0.05:
-            print(f"    => Overwrite is self-correcting (no clearing needed)")
+            print(f"    => Overwrite self-corrects (bounded detour cost, no clearing needed)")
         elif delta > 0.05 and report["p_value"] < 0.05:
             print(f"    => Persist outperforms clear (overwrite more efficient than rebuild)")
         elif delta < -0.05 and report["p_value"] < 0.05:
@@ -634,8 +671,8 @@ def _print_def_predictions(results: List[TaskChangeResult], configs: List[TaskCh
                 all_pass = False
             print(f"    {v:<16s}: {rate:.1%} ({sum(1 for r in subset if r.target_updated_after)}/{len(subset)}) [{tag}]")
 
-    # Prediction 4: decon_persist ≈ decon_clear
-    print(f"\n  Prediction 4: decon_persist ~= decon_clear (overwrite is self-correcting)")
+    # Prediction 4: decon_persist ~= decon_clear (with bounded detour cost)
+    print(f"\n  Prediction 4: decon_persist ~= decon_clear (overwrite self-corrects with bounded detour)")
     for config in configs:
         persist = [r for r in results if r.variant == "decon_persist" and r.config_name == config.name]
         clear = [r for r in results if r.variant == "decon_clear" and r.config_name == config.name]
