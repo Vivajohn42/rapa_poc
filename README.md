@@ -53,6 +53,39 @@ All inter-agent data flows through Pydantic models (`state/schema.py`):
 - `ZD` -- narrative + meaning tags + grounding violations
 - `ZPlan` -- planning output (recommended actions, confidence, risk)
 
+### MvpKernel -- In-Process Governance Layer (`kernel/`)
+
+The `MvpKernel` class is an in-process orchestrator ported from rapa_os. It enforces the same ABI constraints, coupling schedules, and closure invariants without ZMQ -- agents are called directly via Python method calls.
+
+**Tick Lifecycle:**
+```
+1. A.infer_zA(obs)                          # A always runs
+2. MvpTickSignals.from_state(...)           # Compute signals from state
+3. _route(t, signals) -> (gC, gD, decon)   # Gate C and D
+4. schedule_for(t, gC, gD) -> schedule     # Coupling template rotation
+5. enforce_constraints(gC, gD, schedule)    # ABI: AB always, max 1 extra
+6. closure.validate_decision(decision)      # 4 invariant assertions
+7. C.choose_action(zA, B.predict_next)      # Action selection (if gC=1)
+8. D.build_micro(...)                       # Out-of-band (if gD=1)
+9. memory.deconstruct(zC, zD)              # D->C->B via MemoryManager
+10. loop_gain.compute_tick(...)             # G = g_BA * g_CB * g_DC * g_AD
+11. return MvpTickResult(action, gain, ...)
+```
+
+**Key Components:**
+
+| Module | Role |
+|--------|------|
+| `kernel.py` | MvpKernel orchestrator with tick() lifecycle |
+| `types.py` | MvpTickSignals, MvpKernelDecision, MvpLoopGain, MvpTickResult |
+| `abi.py` | `enforce_constraints()` -- 4 hard ABI rules |
+| `closure_core.py` | `validate_decision()` -- invariant checks per tick |
+| `scheduler.py` | Template rotation: 4FoM=[AB], 6FoM=[AB+BC, AB+AC], 8FoM=[AB+CD, AB+BC, AB+AD] |
+| `memory_manager.py` | L3 persistent memory with D->C->B pipeline (capped at 100 entries) |
+| `loop_gain.py` | G/F convergence tracking. g_AD grounding checks for LLM-D (hint, position, goal_mode, tag validity) |
+| `jung_profiles.py` | JungProfile personality profiles (SENSOR, INTUITIVE, ANALYST, DEFAULT) modulating cooldown, stuck_window, tie_break_delta |
+| `state_bridge.py` | Pydantic <-> z-dict adapters for governance compatibility |
+
 ### Coupling Constraints (DEF Pair-to-Pair)
 
 The architecture enforces adjacent pairings only:
@@ -62,6 +95,8 @@ The architecture enforces adjacent pairings only:
 - **C <-> D**: Router uses C's decision_delta to gate D; D feeds back via Deconstruct
 
 D never selects actions directly. D's output flows to C exclusively through `deconstruct_d_to_c()`. This is validated automatically (9/9 checks pass, see Stufe 2).
+
+The MvpKernel enforces these constraints via `abi.py` (gating removes invalid couplings) and `closure_core.py` (assertions on every tick).
 
 ## Environment
 
@@ -392,6 +427,19 @@ python eval/run_planning_horizon.py
 python eval/run_task_change.py
 ```
 
+### Kernel Governance Tests
+
+```bash
+# Kernel smoke test (50 episodes via MvpKernel tick lifecycle)
+python eval/run_kernel_smoke.py
+
+# Loop gain G/F convergence and weakest coupling analysis
+python eval/run_kernel_loop_gain.py
+
+# Jung personality profile behavioral comparison
+python eval/run_kernel_jung.py
+```
+
 ### Legacy Ablation Studies
 
 ```bash
@@ -419,6 +467,17 @@ env/
   gridworld.py        # Parametrizable GridWorld (variable size, multi-goal, dynamic obstacles)
   coded_hints.py      # HintEncoder + CodedGridWorld wrapper for semantic ambiguity
   task_change.py      # TaskChangeGridWorld: two-phase wrapper with mid-episode goal switch
+
+kernel/
+  kernel.py           # MvpKernel: in-process governance orchestrator
+  types.py            # MvpTickSignals, MvpKernelDecision, MvpLoopGain, MvpTickResult
+  abi.py              # ABI constraints (AB always, gating, max 1 extra coupling)
+  closure_core.py     # Closure invariant validation (4 assertions per tick)
+  scheduler.py        # Coupling schedule templates (4FoM/6FoM/8FoM rotation)
+  memory_manager.py   # L3 persistent memory with D->C->B pipeline
+  loop_gain.py        # Loop gain tracker (G = g_BA * g_CB * g_DC * g_AD)
+  jung_profiles.py    # Jung personality profiles (SENSOR, INTUITIVE, ANALYST, DEFAULT)
+  state_bridge.py     # Pydantic <-> z-dict adapters
 
 router/
   router.py           # Router with regime logging (3D/3D+/4D transitions)
@@ -451,6 +510,9 @@ eval/
   llm_utils.py                          # Ollama checks, model discovery, timing
   run_planning_horizon.py               # Stufe 8: B→C planning horizon extension
   run_task_change.py                    # Stufe 9: Task-change stabilization (deconstruct)
+  run_kernel_smoke.py                   # Kernel: smoke test (50 episodes via MvpKernel)
+  run_kernel_loop_gain.py              # Kernel: loop gain G/F convergence
+  run_kernel_jung.py                   # Kernel: Jung profile behavioral comparison
   run_ablation_hidden_goal.py           # Legacy: hidden goal ablation
   run_ablation_hidden_goal_A2.py        # Legacy: A2 knowledge acquisition
   run_ablation_hidden_goal_A2_llm_timing.py  # Legacy: LLM timing
@@ -467,6 +529,11 @@ main.py               # Phase 3b demo (on-demand D + tie-break)
 - `ZC.memory` is episode-scoped via an `episode_id` key to prevent cross-episode leakage
 - Agent C's `anti_stay_penalty` breaks perfect seek/avoid negation symmetry -- this is intentional to prevent degenerate freeze policies
 - Multi-goal hint cells use a partition system: each hint divides goals into two groups, and the environment dynamically computes which group to eliminate based on the true goal
+- MvpKernel governance rules are transport-independent -- same ABI as rapa_os but via in-process Python calls instead of ZMQ
+- D runs out-of-band (6FoM+D overlay): D is never in the coupling schedule, communicates only via deconstruction
+- Loop gain g_AD = 1.0 for deterministic D; for LLM-D, concrete grounding checks validate hint consistency, position consistency, goal-mode consistency, and tag patterns
+- Jung profiles modulate kernel parameters (cooldown, stuck_window, tie_break_delta) without changing agent implementations
+- L3 memory persists across episodes (cross-episode learning); per-episode state is reset via `kernel.reset_episode()`
 
 ## Conceptual Note
 
