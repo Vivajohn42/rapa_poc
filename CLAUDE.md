@@ -24,6 +24,7 @@ python eval/run_drift_test.py              # Stufe 4: Drift & deconstruction
 python eval/run_regime_transition.py       # Stufe 5: Regime transitions
 python eval/run_semantic_ambiguity.py      # Stufe 6: Semantic ambiguity (D's value)
 python eval/run_planning_horizon.py         # Stufe 8: B→C planning horizon extension
+python eval/run_task_change.py              # Stufe 9: Task-change stabilization (deconstruct)
 
 # Stufe 6-LLM: Architecture robustness with stochastic narrative (requires Ollama)
 python -m eval.run_llm_semantic_ambiguity                          # all available models
@@ -78,9 +79,9 @@ Controls when Agent D and PlannerBC are invoked. Triggers: uncertainty (top-2 ac
 
 `deconstruct_plan_to_c()` translates PlannerBC's planning output into C's `tie_break_preference` for action selection during ties.
 
-### Environment (`env/gridworld.py`)
+### Environment (`env/gridworld.py`, `env/task_change.py`)
 
-Parametrizable gridworld supporting variable size (5x5 to 15x15+), multiple candidate goals (2-N) with partition-based hint system, configurable static/random/dynamic obstacles. Default: 5x5, 2 goals, 1 hint cell, 1 obstacle.
+Parametrizable gridworld supporting variable size (5x5 to 15x15+), multiple candidate goals (2-N) with partition-based hint system, configurable static/random/dynamic obstacles. Default: 5x5, 2 goals, 1 hint cell, 1 obstacle. `TaskChangeGridWorld` wraps `GridWorld` with a mid-episode goal switch for Stufe 9 testing.
 
 ### Evaluation (`eval/`)
 
@@ -89,7 +90,7 @@ Parametrizable gridworld supporting variable size (5x5 to 15x15+), multiple cand
 - `metrics.py` -- Scoring and symmetry metrics
 - `drift_metrics.py` -- Tag flip rate, narrative similarity, windowed stability
 - `llm_utils.py` -- Ollama availability checks, model discovery, timed LLM calls
-- Validation scripts: `run_valence_swap.py`, `run_stream_isolation.py`, `run_complexity_scaling.py`, `run_drift_test.py`, `run_regime_transition.py`, `run_semantic_ambiguity.py`, `run_llm_semantic_ambiguity.py`, `run_planning_horizon.py`, `run_llm_drift.py`, `run_llm_regime.py`
+- Validation scripts: `run_valence_swap.py`, `run_stream_isolation.py`, `run_complexity_scaling.py`, `run_drift_test.py`, `run_regime_transition.py`, `run_semantic_ambiguity.py`, `run_llm_semantic_ambiguity.py`, `run_planning_horizon.py`, `run_llm_drift.py`, `run_llm_regime.py`, `run_task_change.py`
 
 ## Key Design Decisions
 
