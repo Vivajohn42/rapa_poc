@@ -24,6 +24,7 @@ Predictions:
   5. Plan confidence decreases with obstacle density
 """
 
+import sys
 import csv
 import random
 from collections import defaultdict
@@ -31,6 +32,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from env.gridworld import GridWorld, GoalDef, HintCellDef
 from agents.agent_a import AgentA

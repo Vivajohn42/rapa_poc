@@ -1,9 +1,12 @@
+import sys
 import csv
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import List, Optional, Tuple, Dict, Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from env.gridworld import GridWorld
 from agents.agent_a import AgentA
