@@ -2,7 +2,7 @@
 
 ## Overview
 
-This repository contains a minimal working prototype (MVP) of the **DEF/RAPA** modular cognitive architecture, together with a comprehensive **9-stage validation suite** (Stufe 0-8) that empirically tests the core claims of the Dimensional Emergence Framework (DEF).
+This repository contains a minimal working prototype (MVP) of the **DEF/RAPA** modular cognitive architecture, together with a comprehensive **10-stage validation suite** (Stufe 0-9) that empirically tests the core claims of the Dimensional Emergence Framework (DEF).
 
 The system demonstrates how transient perceptual information can be transformed into persistent actionable knowledge through:
 
@@ -78,7 +78,7 @@ Default (5x5): Agent starts at (0,0). Hidden true goal is randomly Goal A (4,4) 
 
 ## Validation Results
 
-The validation suite consists of 9 stages (Stufe 0-8), testing increasingly specific DEF and architecture claims.
+The validation suite consists of 10 stages (Stufe 0-9), testing increasingly specific DEF and architecture claims.
 
 ### Stufe 0: Infrastructure
 
@@ -284,6 +284,34 @@ Tested with Mistral 7B (`mistral:latest`) vs deterministic control. Multi-model 
 4. No planner advantage on simple 5x5 (planning is overkill)
 5. Plan confidence inversely correlates with obstacle density (0.80 -> 0.48)
 
+### Stufe 9: Task-Change Stabilization -- Deconstruct as Context Transfer
+
+**DEF Claim**: Deconstruct stabilizes behavior during task changes by persisting context into actionable state AND cleanly overwriting it when the task changes.
+
+A two-phase episode tests whether Deconstruct's overwrite mechanism enables adaptation to mid-episode goal switches:
+
+1. **Phase 1**: Agent seeks Goal A. Hint cell 1 reveals "target is A". Deconstruct writes `mem["target"] = A_pos`.
+2. **Goal switch** (triggered by Phase 1 completion or step count): True goal changes to B. Hint cell 2 becomes available.
+3. **Phase 2**: Agent must find Goal B. Hint cell 2 reveals "target is B". Deconstruct must overwrite `mem["target"]` from A to B.
+
+4 variants tested across 3 configurations (10x10 phase1-switch, 10x10 step50-switch, 15x15 phase1-switch):
+
+| Variant | D | Deconstruct | Phase 2 SR (aggregate) |
+|---------|---|-------------|:---:|
+| no_d | off | off | 0.000 |
+| d_no_decon | on | off | 0.000 |
+| decon_persist | on | on (overwrite) | **0.377** |
+| decon_clear | on | on (clear at switch) | **0.377** |
+
+**All 5 DEF predictions PASS**:
+1. `decon_persist` >> `no_d` in Phase 2 SR (p < 0.001) -- Deconstruct enables task adaptation
+2. `decon_persist` >> `d_no_decon` in Phase 2 SR (p < 0.001) -- it is Deconstruct, not D alone
+3. Target update rate: decon variants 83.2%, non-decon 0.0% -- Deconstruct creates actionable state
+4. `decon_persist` == `decon_clear` (delta = 0.000, p = 1.000) -- overwrite mechanism is sufficient, no explicit clearing needed
+5. Phase 1 performance identical across all variants (spread = 0.000) -- Deconstruct's value emerges only at the task switch
+
+Adaptation speed: 6.8 steps to target update (10x10), 13.0 steps (15x15).
+
 ### Summary of DEF Claims Validated
 
 | Stufe | DEF Claim | Test | Result |
@@ -299,6 +327,7 @@ Tested with Mistral 7B (`mistral:latest`) vs deterministic control. Multi-model 
 | 6-LLM | Stochastic narrative doesn't disrupt hint pipeline | LLM robustness test | **PASS** (5/5) |
 | 7 | LLM-D preserves architecture properties | Multi-model drift + regime | **PASS** (8/8) |
 | 8 | Extended B→C lookahead helps in obstacle-rich tasks | PlannerBC beam search | **PASS** (5/5) |
+| 9 | Deconstruct stabilizes during task changes | Two-phase goal switch | **PASS** (5/5) |
 
 ## Running the Tests
 
@@ -319,7 +348,7 @@ pip install pydantic requests tqdm
 python main.py
 ```
 
-### Validation Suite (Stufe 0-8)
+### Validation Suite (Stufe 0-9)
 
 ```bash
 # Stufe 0: Ablation with symmetry check
@@ -356,6 +385,9 @@ python -m eval.run_llm_regime --model mistral:latest  # 7b: single model
 
 # Stufe 8: B→C planning horizon extension
 python eval/run_planning_horizon.py
+
+# Stufe 9: Task-change stabilization (deconstruct as context transfer)
+python eval/run_task_change.py
 ```
 
 ### Legacy Ablation Studies
@@ -384,6 +416,7 @@ agents/
 env/
   gridworld.py        # Parametrizable GridWorld (variable size, multi-goal, dynamic obstacles)
   coded_hints.py      # HintEncoder + CodedGridWorld wrapper for semantic ambiguity
+  task_change.py      # TaskChangeGridWorld: two-phase wrapper with mid-episode goal switch
 
 router/
   router.py           # Router with regime logging (3D/3D+/4D transitions)
@@ -415,6 +448,7 @@ eval/
   run_llm_regime.py                     # Stufe 7b: LLM-D regime transition (multi-model)
   llm_utils.py                          # Ollama checks, model discovery, timing
   run_planning_horizon.py               # Stufe 8: B→C planning horizon extension
+  run_task_change.py                    # Stufe 9: Task-change stabilization (deconstruct)
   run_ablation_hidden_goal.py           # Legacy: hidden goal ablation
   run_ablation_hidden_goal_A2.py        # Legacy: A2 knowledge acquisition
   run_ablation_hidden_goal_A2_llm_timing.py  # Legacy: LLM timing
