@@ -60,6 +60,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Dict
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from env.gridworld import GridWorld, GoalDef, HintCellDef
 from env.coded_hints import CodedGridWorld, HintEncoder
 from agents.agent_a import AgentA

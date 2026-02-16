@@ -17,12 +17,15 @@ DEF Predictions:
   4. D's marginal gain is higher in 4D tasks than in 2D tasks
 """
 
+import sys
 import csv
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Dict, Tuple
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from env.gridworld import GridWorld
 from agents.agent_a import AgentA

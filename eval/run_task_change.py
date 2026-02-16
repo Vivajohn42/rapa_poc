@@ -26,6 +26,7 @@ DEF Predictions:
   5. Phase-1 performance similar across all D variants
 """
 
+import sys
 import csv
 import random
 from collections import deque
@@ -33,6 +34,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from env.task_change import TaskChangeGridWorld
 from agents.agent_a import AgentA

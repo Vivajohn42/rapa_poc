@@ -19,11 +19,15 @@ DEF Predictions:
   4. d_routed achieves good stability with fewer D calls (efficiency)
 """
 
+import sys
 import csv
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from typing import List, Optional, Dict, Any
 
 from env.gridworld import GridWorld

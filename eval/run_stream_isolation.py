@@ -22,12 +22,15 @@ failure modes:
     d_only            — D only, no A, no B, no C (must fail completely)
 """
 
+import sys
 import csv
 import random
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Dict, Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from env.gridworld import GridWorld
 from agents.agent_a import AgentA

@@ -21,11 +21,14 @@ Part 3 — MID-EPISODE VALENCE SWAP:
   while C inverts immediately at the swap point.
 """
 
+import sys
 import csv
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from env.gridworld import GridWorld
 from agents.agent_a import AgentA
