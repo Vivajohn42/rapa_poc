@@ -41,6 +41,13 @@ python -m eval.run_llm_regime --model phi3:mini       # 7b: single model
 python eval/run_kernel_smoke.py              # Kernel smoke test (50 episodes)
 python eval/run_kernel_loop_gain.py          # Loop gain G/F convergence
 python eval/run_kernel_jung.py               # Jung personality profiles
+python eval/run_kernel_llm_loop_gain.py      # LLM-D loop gain (requires Ollama)
+
+# TextWorld: D-essentiality validation
+python eval/run_textworld_ablation.py                  # D-ablation (with_d vs no_d vs random)
+python eval/run_textworld_ablation.py --llm             # Include LLM-D variant (requires Ollama)
+python eval/run_textworld_ablation.py --scenario 0      # Single scenario
+python eval/run_textworld_loop_gain.py                  # Persistence Theorem on TextWorld
 
 # Legacy ablation studies
 python eval/run_ablation_hidden_goal.py
@@ -98,9 +105,22 @@ In-process governance layer ported from rapa_os. Enforces the same ABI constrain
 - **`jung_profiles.py`** -- `JungProfile` with I/E, S/N, T/F axes modulating cooldown, stuck_window, tie_break_delta, deconstruct_cooldown. Pre-defined: SENSOR, INTUITIVE, ANALYST, DEFAULT.
 - **`state_bridge.py`** -- Pure functions converting Pydantic models (ZA/ZC/ZD/ZPlan) to rapa_os-compatible z-dicts.
 
-### Environment (`env/gridworld.py`, `env/task_change.py`)
+### Environment (`env/gridworld.py`, `env/task_change.py`, `env/textworld.py`)
 
 Parametrizable gridworld supporting variable size (5x5 to 15x15+), multiple candidate goals (2-N) with partition-based hint system, configurable static/random/dynamic obstacles. Default: 5x5, 2 goals, 1 hint cell, 1 obstacle. `TaskChangeGridWorld` wraps `GridWorld` with a mid-episode goal switch for Stufe 9 testing.
+
+**TextWorld** (`env/textworld.py`): Text-based "Clue Rooms" environment where D is architecturally essential. A network of named rooms connected by exits. Clue fragments are scattered across rooms; no single clue identifies the target — only multi-clue synthesis (constraint propagation) reveals it. Agent must explicitly `"claim"` in the target room to succeed. 5 hand-crafted scenarios (4-8 rooms, 2-3 clues each). Results: with_d=100% SR, no_d=0% SR, LLM-D=52% SR.
+
+### TextWorld Agents
+
+Domain-specific agents for TextWorld, sharing interfaces with GridWorld agents:
+
+- **TextAgentA** (`agents/text_agent_a.py`) -- Parses room observations into ZA using pseudo-positions `(room_index, 0)`.
+- **TextAgentB** (`agents/text_agent_b.py`) -- Graph-based forward model using room exit lookup tables.
+- **TextAgentC** (`agents/text_agent_c.py`) -- BFS graph-distance scoring. Claims when at target room. Explores toward nearest unvisited room when no target set. Has `_TextGoalProxy` for kernel compatibility.
+- **TextAgentD** (`agents/text_agent_d.py`) -- Deterministic clue synthesizer via constraint propagation. Extracts required/negated properties from natural language clues, eliminates candidate rooms until one remains.
+- **TextAgentDLLM** (`agents/text_agent_d_llm.py`) -- LLM-backed clue synthesis. Prompts LLM with room properties + collected clues to identify target. Validates grounding (hallucinated room detection).
+- **`router/deconstruct_text.py`** -- Text-specific D→C pipeline: maps `"target:room_id"` tag to pseudo-position in C's memory.
 
 ### Evaluation (`eval/`)
 
@@ -110,7 +130,8 @@ Parametrizable gridworld supporting variable size (5x5 to 15x15+), multiple cand
 - `drift_metrics.py` -- Tag flip rate, narrative similarity, windowed stability
 - `llm_utils.py` -- Ollama availability checks, model discovery, timed LLM calls
 - Validation scripts: `run_valence_swap.py`, `run_stream_isolation.py`, `run_complexity_scaling.py`, `run_drift_test.py`, `run_regime_transition.py`, `run_semantic_ambiguity.py`, `run_llm_semantic_ambiguity.py`, `run_planning_horizon.py`, `run_llm_drift.py`, `run_llm_regime.py`, `run_task_change.py`
-- Kernel governance tests: `run_kernel_smoke.py` (MvpKernel tick lifecycle), `run_kernel_loop_gain.py` (G/F convergence, weakest coupling), `run_kernel_jung.py` (Jung profile behavioral diff)
+- Kernel governance tests: `run_kernel_smoke.py` (MvpKernel tick lifecycle), `run_kernel_loop_gain.py` (G/F convergence, weakest coupling), `run_kernel_jung.py` (Jung profile behavioral diff), `run_kernel_llm_loop_gain.py` (LLM-D loop gain validation)
+- TextWorld D-essentiality: `run_textworld_ablation.py` (D-ablation with_d/no_d/random/llm), `run_textworld_loop_gain.py` (Persistence Theorem: g_DC progression, G/F collapse)
 
 ## Key Design Decisions
 
@@ -125,3 +146,8 @@ Parametrizable gridworld supporting variable size (5x5 to 15x15+), multiple cand
 - Loop gain g_AD distinguishes deterministic D (always 1.0) from LLM D (grounding checks with weighted violations)
 - Jung profiles modulate kernel parameters (cooldown, stuck_window, tie_break_delta) without changing agent implementations
 - L3 memory persists across episodes; per-episode state is reset via `kernel.reset_episode()`
+- TextWorld uses pseudo-positions `(room_index, 0)` to satisfy ZA interface without kernel changes — kernel only checks equality (stuck) and inequality (movement)
+- TextWorld requires explicit `"claim"` action to succeed — prevents accidental success without D's target identification
+- `MvpMemoryManager` accepts optional `deconstruct_fn` for domain-specific D→C pipelines (default: GridWorld's `deconstruct_d_to_c`)
+- `loop_gain.py` uses dynamic actions from `scored` list (not hardcoded), and `has_agent_d` flag to correctly decay g_DC/g_AD when D is absent
+- g_DC detects target-in-memory via hint-capture path (not only via gD=1 route), ensuring accurate coupling measurement

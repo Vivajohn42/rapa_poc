@@ -10,7 +10,10 @@ The system demonstrates how transient perceptual information can be transformed 
 - A deterministic **Deconstruction interface**
 - A **Control stream** (C) with persistent memory
 
-The MVP is implemented in a GridWorld environment with partial observability and a hidden-goal task requiring knowledge acquisition.
+The MVP is implemented in two environments:
+
+- **GridWorld**: Partial observability with a hidden-goal task requiring knowledge acquisition. D is useful but optional.
+- **TextWorld**: Text-based "Clue Rooms" where D is architecturally essential. Without D, the agent cannot identify the target room (0% success). With D, constraint propagation over scattered clue fragments yields 100% success.
 
 ## Architecture
 
@@ -36,7 +39,13 @@ A (Perception) --> B (Dynamics) --> C (Valence/Control) --> Action
 | **D-Interpreter** | Extended D with coded hint interpretation capability | `agents/agent_d_interpreter.py` |
 | **D-LLM-Interpreter** | LLM narrative + deterministic coded hint interpretation | `agents/agent_d_llm_interpreter.py` |
 | **PlannerBC** | B→C planning extension: multi-step beam-search lookahead using B's forward model | `agents/planner_bc.py` |
+| **TextAgentA** | TextWorld perception -- room observation to ZA pseudo-position | `agents/text_agent_a.py` |
+| **TextAgentB** | TextWorld dynamics -- graph-based forward model | `agents/text_agent_b.py` |
+| **TextAgentC** | TextWorld control -- BFS graph-distance scoring + claim action | `agents/text_agent_c.py` |
+| **TextAgentD** | TextWorld narrative -- deterministic constraint propagation over clues | `agents/text_agent_d.py` |
+| **TextAgentDLLM** | TextWorld narrative -- LLM-backed clue synthesis | `agents/text_agent_d_llm.py` |
 | **Deconstruct** | Deterministic translation of D-output into structured C-memory | `router/deconstruct.py` |
+| **Deconstruct-Text** | TextWorld D->C pipeline (target tag to pseudo-position) | `router/deconstruct_text.py` |
 | **Deconstruct-Plan** | Plan-to-C transfer (sets tie_break_preference) | `router/deconstruct_plan.py` |
 | **Router** | Activates D on demand; manages 3D/4D regime transitions; gates planner | `router/router.py` |
 
@@ -110,6 +119,41 @@ Parametrizable gridworld supporting:
 - **Obstacles**: Static (fixed), random (configurable count), dynamic (move periodically)
 
 Default (5x5): Agent starts at (0,0). Hidden true goal is randomly Goal A (4,4) or Goal B (4,0). Single hint cell at (0,4) reveals which goal is correct. One obstacle at (2,2). Rewards: +1 on goal reach, -0.01 per step.
+
+### TextWorld -- Clue Rooms
+
+Text-based environment where D is architecturally essential. A network of named rooms connected by exits. Each room has a text description and properties. Clue fragments are scattered across rooms -- no single clue identifies the target room; only constraint propagation over all clues yields a unique answer.
+
+**Claim mechanic**: Agent must explicitly `"claim"` in the target room to succeed. Without D, C has no target and never claims (0% SR). With D, clue synthesis identifies the target, C navigates and claims (100% SR).
+
+5 hand-crafted scenarios:
+
+| Scenario | Rooms | Clues | Theme |
+|----------|:---:|:---:|-------|
+| 0 | 5 | 2 | Treasure Hunt (property elimination) |
+| 1 | 6 | 2 | Old Mansion (negation + directional) |
+| 2 | 6 | 3 | Hidden Message (multi-clue required) |
+| 3 | 7 | 2 | Secret Lab (equipment elimination) |
+| 4 | 5 | 2 | Pirate Cove (environmental clues) |
+
+**D-Ablation Results:**
+
+| Variant | SR | Steps | Target ID |
+|---------|:---:|:---:|:---:|
+| det-D | **100%** | 6.0 | 100% |
+| LLM-D (Mistral) | 52% | 26.5 | 84% |
+| no-D | **0%** | 50.0 | 0% |
+| random | 42% | 39.4 | 0% |
+
+**Persistence Theorem (Loop Gain):**
+
+| Metric | with_d | no_d |
+|--------|:---:|:---:|
+| g_DC mean | 0.813 | 0.175 |
+| g_AD mean | 1.000 | 0.351 |
+| G/F mean | 0.843 | 0.540 |
+| Weakest | CD=49% | CD=100% |
+| g_DC progression | 0.50 -> 0.76 -> 0.84 -> 1.00 | constant 0.175 |
 
 ## Validation Results
 
@@ -349,6 +393,37 @@ After the switch, `decon_persist` follows its old target (Goal A) for up to 5 st
 
 Adaptation speed: persist 9.3 steps / clear 6.8 steps (10x10), persist 17.0 / clear 13.0 (15x15). The ~4-step detour is the measured cost of stale memory -- bounded and absorbed by the overwrite mechanism.
 
+### TextWorld: D-Essentiality Validation
+
+**DEF Claim**: In a domain where multi-clue semantic synthesis is required, D becomes architecturally essential -- not merely decorative. Without D, the agent cannot solve the task.
+
+**D-Ablation (5 scenarios x 20 episodes each):**
+
+| Assertion | Result | Threshold |
+|-----------|:---:|:---:|
+| with_d SR | **100%** | >= 70% |
+| no_d SR | **0%** | <= 40% |
+| SR delta | **100pp** | >= 30pp |
+| g_DC(with_d) > g_DC(no_d) | 0.813 > 0.175 | PASS |
+
+**Persistence Theorem (Loop Gain on TextWorld):**
+
+| Assertion | Result |
+|-----------|:---:|
+| G/F collapse: with_d > no_d | 0.843 > 0.540 **PASS** |
+| g_DC: with_d > no_d | 0.813 > 0.175 **PASS** |
+| SR delta >= 50pp | 100pp **PASS** |
+| g_DC progression (early -> late) | 0.699 -> 1.000 **PASS** |
+| g_AD(with_d) >= 0.95 | 1.000 **PASS** |
+
+**LLM-D (Mistral, 5 scenarios x 10 episodes):**
+- SR = 52% (between det-D 100% and no_d 0%)
+- Target ID = 84% (LLM synthesizes correctly in most cases)
+- g_AD = 0.998 (minimal hallucinations)
+- Hardest scenario: Secret Lab (0% LLM SR -- "without machines" is semantically complex)
+
+**All 9 assertions PASS.**
+
 ### Summary of DEF Claims Validated
 
 | Stufe | DEF Claim | Test | Result |
@@ -365,6 +440,7 @@ Adaptation speed: persist 9.3 steps / clear 6.8 steps (10x10), persist 17.0 / cl
 | 7 | LLM-D preserves architecture properties | Multi-model drift + regime | **PASS** (8/8) |
 | 8 | Extended B→C lookahead helps in obstacle-rich tasks | PlannerBC beam search | **PASS** (5/5) |
 | 9 | Deconstruct stabilizes during task changes | Two-phase goal switch | **PASS** (5/5) |
+| TW | D is architecturally essential in semantic domains | TextWorld D-ablation + Persistence Theorem | **PASS** (9/9) |
 
 ## Running the Tests
 
@@ -438,6 +514,25 @@ python eval/run_kernel_loop_gain.py
 
 # Jung personality profile behavioral comparison
 python eval/run_kernel_jung.py
+
+# LLM-D loop gain validation (requires Ollama)
+python eval/run_kernel_llm_loop_gain.py
+```
+
+### TextWorld D-Essentiality Tests
+
+```bash
+# D-ablation: with_d vs no_d vs random (deterministic D)
+python eval/run_textworld_ablation.py
+
+# Include LLM-D variant (requires Ollama)
+python eval/run_textworld_ablation.py --llm
+
+# Single scenario, custom episode count
+python eval/run_textworld_ablation.py --scenario 0 --n 30
+
+# Persistence Theorem: g_DC progression, G/F collapse
+python eval/run_textworld_loop_gain.py
 ```
 
 ### Legacy Ablation Studies
@@ -462,11 +557,17 @@ agents/
   agent_d_interpreter.py  # Stream D: Extended D with coded hint interpretation
   agent_d_llm_interpreter.py  # Stream D: LLM narrative + deterministic hint interpretation
   planner_bc.py       # B→C planning extension: multi-step beam-search lookahead
+  text_agent_a.py     # TextWorld A: room observation -> ZA pseudo-position
+  text_agent_b.py     # TextWorld B: graph-based forward model
+  text_agent_c.py     # TextWorld C: BFS graph-distance scoring + claim action
+  text_agent_d.py     # TextWorld D: deterministic constraint propagation over clues
+  text_agent_d_llm.py # TextWorld D: LLM-backed clue synthesis (Ollama)
 
 env/
   gridworld.py        # Parametrizable GridWorld (variable size, multi-goal, dynamic obstacles)
   coded_hints.py      # HintEncoder + CodedGridWorld wrapper for semantic ambiguity
   task_change.py      # TaskChangeGridWorld: two-phase wrapper with mid-episode goal switch
+  textworld.py        # TextWorld: Clue Rooms environment (5 scenarios, claim mechanic)
 
 kernel/
   kernel.py           # MvpKernel: in-process governance orchestrator
@@ -482,6 +583,7 @@ kernel/
 router/
   router.py           # Router with regime logging (3D/3D+/4D transitions)
   deconstruct.py      # D->C knowledge transfer (multi-goal support)
+  deconstruct_text.py # TextWorld D->C pipeline (target tag to pseudo-position)
   deconstruct_plan.py # Plan->C transfer (tie_break_preference)
 
 state/
@@ -513,6 +615,9 @@ eval/
   run_kernel_smoke.py                   # Kernel: smoke test (50 episodes via MvpKernel)
   run_kernel_loop_gain.py              # Kernel: loop gain G/F convergence
   run_kernel_jung.py                   # Kernel: Jung profile behavioral comparison
+  run_kernel_llm_loop_gain.py          # Kernel: LLM-D loop gain validation
+  run_textworld_ablation.py            # TextWorld: D-ablation (with_d/no_d/random/llm)
+  run_textworld_loop_gain.py           # TextWorld: Persistence Theorem (g_DC progression, G/F)
   run_ablation_hidden_goal.py           # Legacy: hidden goal ablation
   run_ablation_hidden_goal_A2.py        # Legacy: A2 knowledge acquisition
   run_ablation_hidden_goal_A2_llm_timing.py  # Legacy: LLM timing
@@ -534,6 +639,10 @@ main.py               # Phase 3b demo (on-demand D + tie-break)
 - Loop gain g_AD = 1.0 for deterministic D; for LLM-D, concrete grounding checks validate hint consistency, position consistency, goal-mode consistency, and tag patterns
 - Jung profiles modulate kernel parameters (cooldown, stuck_window, tie_break_delta) without changing agent implementations
 - L3 memory persists across episodes (cross-episode learning); per-episode state is reset via `kernel.reset_episode()`
+- TextWorld uses pseudo-positions `(room_index, 0)` to satisfy ZA interface without kernel changes
+- TextWorld requires explicit `"claim"` action -- prevents accidental success without D's target identification
+- `MvpMemoryManager` accepts optional `deconstruct_fn` for domain-specific D->C pipelines (GridWorld default preserved)
+- Loop gain uses dynamic actions from `scored` list and `has_agent_d` flag to correctly model D-absent configurations
 
 ## Conceptual Note
 
