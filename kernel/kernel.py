@@ -39,6 +39,8 @@ from kernel.scheduler import schedule_for
 from kernel.closure_core import ClosureCore
 from kernel.memory_manager import MvpMemoryManager
 from kernel.loop_gain import MvpLoopGainTracker
+from kernel.closure_residuum import ClosureResiduum
+from kernel.interfaces import StreamA, StreamB, StreamC, StreamD
 
 from state.schema import ZC, ZD
 
@@ -60,10 +62,10 @@ class MvpKernel:
 
     def __init__(
         self,
-        agent_a,
-        agent_b,
-        agent_c,
-        agent_d=None,
+        agent_a: StreamA,
+        agent_b: StreamB,
+        agent_c: StreamC,
+        agent_d: Optional[StreamD] = None,
         *,
         goal_map: Optional[Dict[str, Tuple[int, int]]] = None,
         enable_governance: bool = True,
@@ -74,6 +76,7 @@ class MvpKernel:
         tie_break_delta: float = 0.25,
         deconstruct_cooldown_ticks: int = 3,
         deconstruct_fn=None,
+        fallback_actions: Optional[List[str]] = None,
     ):
         self.agent_a = agent_a
         self.agent_b = agent_b
@@ -82,6 +85,7 @@ class MvpKernel:
         self.goal_map = goal_map
         self.enable_governance = enable_governance
         self.jung_profile = jung_profile
+        self._fallback_actions = fallback_actions
 
         # Apply Jung profile overrides (if provided)
         if jung_profile is not None:
@@ -105,6 +109,16 @@ class MvpKernel:
 
         # Loop gain tracker (M4)
         self._loop_gain = MvpLoopGainTracker()
+
+        # Closure residuum tracker
+        # D is always out-of-band in MVP → effective schedule is 6FoM (2 templates)
+        ie_weight = jung_profile.ie_weight if jung_profile is not None else 0.5
+        sn_weight = jung_profile.sn_weight if jung_profile is not None else 0.5
+        self._residuum = ClosureResiduum(
+            n_schedule_templates=2,  # len(TEMPL_6FOM)
+            ie_weight=ie_weight,
+            sn_weight=sn_weight,
+        )
 
         # Per-episode state
         self._last_decision_delta: Optional[float] = None
@@ -134,6 +148,9 @@ class MvpKernel:
 
         # Reset loop gain tracker per episode
         self._loop_gain.reset_episode()
+
+        # Reset closure residuum tracker per episode
+        self._residuum.reset_episode()
 
         self._zC = ZC(goal_mode=goal_mode, memory={})
         self._zC.memory["episode_id"] = episode_id
@@ -309,11 +326,26 @@ class MvpKernel:
             has_agent_d=(self.agent_d is not None),
         )
 
+        # ---- 12. Closure Residuum ----
+        residual = self._residuum.compute_tick(
+            zA=zA,
+            zC=zC,
+            zD=zD,
+            scored=scored,
+            predict_next_fn=self.agent_b.predict_next,
+            gC=gC,
+            gD=gD,
+            tick_id=t,
+            has_agent_d=(self.agent_d is not None),
+            weakest_coupling=gain.weakest_coupling,
+        )
+
         return MvpTickResult(
             action=action,
             scored=scored,
             decision=decision,
             gain=gain,
+            residual=residual,
             d_activated=d_activated,
             decon_fired=decon_fired,
         )
@@ -333,6 +365,11 @@ class MvpKernel:
     def loop_gain(self) -> MvpLoopGainTracker:
         """Loop gain tracker (per-episode history)."""
         return self._loop_gain
+
+    @property
+    def residuum(self) -> ClosureResiduum:
+        """Closure residuum tracker (per-episode history)."""
+        return self._residuum
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -378,6 +415,13 @@ class MvpKernel:
             elif self._is_stuck() and t >= self._d_cooldown_until:
                 gD = 1
                 self._d_cooldown_until = t + self.d_cooldown_steps
+            # Phase 4: Delta_8-based D activation (high fixpoint deviation)
+            elif (self._residuum.episode_history
+                  and t >= self._d_cooldown_until):
+                latest_delta_8 = self._residuum.episode_history[-1].delta_8
+                if latest_delta_8 > self._residuum.activation_threshold:
+                    gD = 1
+                    self._d_cooldown_until = t + self.d_cooldown_steps
 
         # Deconstruction triggers
         decon = False
@@ -394,6 +438,12 @@ class MvpKernel:
         if signals.marginal_gain_d <= 0.05:
             decon = True
             reasons.append("MARGINAL_GAIN_LOW")
+        # Phase 3: dDelta_8/dt divergence trigger
+        if self._residuum.episode_history:
+            latest = self._residuum.episode_history[-1]
+            if latest.d_delta_8_dt > self._residuum.divergence_threshold:
+                decon = True
+                reasons.append("RESIDUUM_DIVERGENCE")
 
         return gC, gD, decon, reasons
 
@@ -429,7 +479,7 @@ class MvpKernel:
         avoiding walls. Fallback when gC=0.
         """
         import random
-        actions = ["up", "down", "left", "right"]
+        actions = self._fallback_actions or ["up", "down", "left", "right"]
         # Prefer actions that actually move
         moving = []
         for a in actions:

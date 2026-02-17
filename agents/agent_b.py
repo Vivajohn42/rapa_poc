@@ -1,8 +1,10 @@
 from state.schema import ZA
+from kernel.interfaces import StreamB
 
 ACTIONS = ("up", "down", "left", "right")
 
-class AgentB:
+
+class AgentB(StreamB):
     """
     Deterministisches Dynamikmodell für die Gridworld.
     Vorhersage: zA_next = f(zA, action)

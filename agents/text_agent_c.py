@@ -9,6 +9,7 @@ from collections import deque
 from typing import Dict, List, Optional, Tuple
 
 from state.schema import ZA
+from kernel.interfaces import StreamC
 
 
 class _TextGoalProxy:
@@ -30,7 +31,7 @@ class _TextGoalProxy:
         self._agent.target_room = room
 
 
-class TextAgentC:
+class TextAgentC(StreamC):
     """Graph-distance-based action scorer for TextWorld."""
 
     def __init__(
@@ -47,10 +48,14 @@ class TextAgentC:
         self.goal_mode = goal_mode
         self.anti_stay_penalty = anti_stay_penalty
         self.target_room: Optional[str] = None  # set by deconstruction
-        self.goal = _TextGoalProxy(self)       # kernel-compatible proxy
+        self._goal = _TextGoalProxy(self)       # kernel-compatible proxy
 
         # Precompute BFS distances between all room pairs
         self._distances = self._compute_all_distances()
+
+    @property
+    def goal(self) -> _TextGoalProxy:
+        return self._goal
 
     def _compute_all_distances(self) -> Dict[str, Dict[str, int]]:
         """BFS all-pairs shortest path on the room graph."""

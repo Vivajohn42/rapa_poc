@@ -31,7 +31,10 @@ class TextEvent:
     clue: Optional[str]
 
 
-class TextAgentDLLM:
+from kernel.interfaces import StreamD
+
+
+class TextAgentDLLM(StreamD):
     """LLM-backed clue synthesizer for TextWorld."""
 
     def __init__(

@@ -10,12 +10,27 @@ The system demonstrates how transient perceptual information can be transformed 
 - A deterministic **Deconstruction interface**
 - A **Control stream** (C) with persistent memory
 
-The MVP is implemented in two environments:
+The MVP is implemented in three environments:
 
 - **GridWorld**: Partial observability with a hidden-goal task requiring knowledge acquisition. D is useful but optional.
 - **TextWorld**: Text-based "Clue Rooms" where D is architecturally essential. Without D, the agent cannot identify the target room (0% success). With D, constraint propagation over scattered clue fragments yields 100% success.
+- **Riddle Rooms**: Non-spatial propositional logic puzzles (no navigation). D is essential for constraint synthesis over clue fragments. Proves the architecture is not bound to spatial domains.
 
 ## Architecture
+
+### Three-Layer Design
+
+```
++----------------------------------+
+|  Kernel (Governance, G/F, Delta8)|  <- universal, domain-free
++----------------------------------+
+|  Stream Interfaces (A/B/C/D)    |  <- 4 abstract classes
++----------------------------------+
+|  Environment Adapter             |  <- 1 per domain, for eval scripts
++----------------------------------+
+```
+
+All domain-specific agents inherit from abstract base classes (`kernel/interfaces.py`): `StreamA`, `StreamB`, `StreamC`, `StreamD`. The kernel only depends on these interfaces — it never imports domain-specific code. `EnvironmentAdapter` standardizes eval-script infrastructure (reset, step, make_agents, deconstruct_fn).
 
 ### Stream Pipeline
 
@@ -44,8 +59,13 @@ A (Perception) --> B (Dynamics) --> C (Valence/Control) --> Action
 | **TextAgentC** | TextWorld control -- BFS graph-distance scoring + claim action | `agents/text_agent_c.py` |
 | **TextAgentD** | TextWorld narrative -- deterministic constraint propagation over clues | `agents/text_agent_d.py` |
 | **TextAgentDLLM** | TextWorld narrative -- LLM-backed clue synthesis | `agents/text_agent_d_llm.py` |
+| **RiddleAgentA** | Riddle Rooms perception -- evidence hash to pseudo-position | `agents/riddle_agent_a.py` |
+| **RiddleAgentB** | Riddle Rooms dynamics -- forward model for test/submit actions | `agents/riddle_agent_b.py` |
+| **RiddleAgentC** | Riddle Rooms control -- information value scoring + submit-when-target-known | `agents/riddle_agent_c.py` |
+| **RiddleAgentD** | Riddle Rooms narrative -- constraint propagation over clue fragments | `agents/riddle_agent_d.py` |
 | **Deconstruct** | Deterministic translation of D-output into structured C-memory | `router/deconstruct.py` |
 | **Deconstruct-Text** | TextWorld D->C pipeline (target tag to pseudo-position) | `router/deconstruct_text.py` |
+| **Deconstruct-Riddle** | Riddle Rooms D->C pipeline (answer/target tags to memory) | `router/deconstruct_riddle.py` |
 | **Deconstruct-Plan** | Plan-to-C transfer (sets tie_break_preference) | `router/deconstruct_plan.py` |
 | **Router** | Activates D on demand; manages 3D/4D regime transitions; gates planner | `router/router.py` |
 
@@ -85,10 +105,12 @@ The `MvpKernel` class is an in-process orchestrator ported from rapa_os. It enfo
 
 | Module | Role |
 |--------|------|
-| `kernel.py` | MvpKernel orchestrator with tick() lifecycle |
-| `types.py` | MvpTickSignals, MvpKernelDecision, MvpLoopGain, MvpTickResult |
+| `kernel.py` | MvpKernel orchestrator with tick() lifecycle. Type-hinted against StreamA/B/C/D interfaces |
+| `interfaces.py` | Abstract base classes: StreamA, StreamB, StreamC, StreamD, EnvironmentAdapter, GoalTarget Protocol |
+| `types.py` | MvpTickSignals, MvpKernelDecision, MvpLoopGain, MvpTickResult, ResidualSnapshot |
 | `abi.py` | `enforce_constraints()` -- 4 hard ABI rules |
 | `closure_core.py` | `validate_decision()` -- invariant checks per tick |
+| `closure_residuum.py` | Closure Residuum (Delta_8) tracking with dynamic thresholds derived from Jung profiles |
 | `scheduler.py` | Template rotation: 4FoM=[AB], 6FoM=[AB+BC, AB+AC], 8FoM=[AB+CD, AB+BC, AB+AD] |
 | `memory_manager.py` | L3 persistent memory with D->C->B pipeline (capped at 100 entries) |
 | `loop_gain.py` | G/F convergence tracking. g_AD grounding checks for LLM-D (hint, position, goal_mode, tag validity) |
@@ -154,6 +176,50 @@ Text-based environment where D is architecturally essential. A network of named 
 | G/F mean | 0.843 | 0.540 |
 | Weakest | CD=49% | CD=100% |
 | g_DC progression | 0.50 -> 0.76 -> 0.84 -> 1.00 | constant 0.175 |
+
+### Riddle Rooms -- Non-Spatial Logic Puzzles
+
+Purely propositional environment with no navigation graph. State = set of known propositions. Actions = `test_X` (reveal evidence) or `submit_Y` (propose answer). Proves the architecture is not bound to spatial domains.
+
+Each puzzle is a logic problem where individual clues are ambiguous -- only D's constraint propagation over multiple clue fragments identifies the unique answer.
+
+5 hand-crafted puzzles:
+
+| Puzzle | Answers | Tests | Theme |
+|--------|:---:|:---:|-------|
+| Liar Boxes | 3 | 2 | All labels lie, cross-reference required |
+| Alibi Check | 4 | 3 | Suspect elimination via alibi fragments |
+| Sequence Rule | 4 | 3 | Number pattern from examples |
+| Schedule Puzzle | 3 | 3 | Person-slot assignment with constraints |
+| Inference Chain | 4 | 4 | Forward-chaining If-Then rules |
+
+**D-Essentiality Results:**
+
+| Variant | SR | Mechanism |
+|---------|:---:|-----------|
+| with_d | **100%** | D synthesizes clues, C submits correct answer |
+| no_d | **0%** | C cannot distinguish submit actions, guesses randomly |
+
+**Reward schema**: -0.01/step, +0.1 new evidence, +1.0 correct submit, -0.3 wrong submit.
+
+### Cross-Environment Stability Matrix
+
+The stability matrix validates universal patterns across all three environments:
+
+| Env | Variant | SR | Delta_8 | G/F | dDelta_8/dt |
+|-----|---------|-----|---------|------|-------------|
+| gridworld | with_d | 100% | 0.63 | 1.14 | -0.12 |
+| gridworld | no_d | 0% | 1.29 | 0.44 | +0.00 |
+| textworld | with_d | 100% | 0.51 | 0.84 | -0.20 |
+| textworld | no_d | 0% | 1.23 | 0.54 | +0.00 |
+| riddle | with_d | 100% | 0.67 | 0.47 | -0.29 |
+| riddle | no_d | 0% | 1.20 | 0.44 | -0.02 |
+
+**Universal assertions (ALL PASS)**:
+1. dDelta_8/dt converges in successful episodes (< 0.05)
+2. D reduces residuum in every environment (with_d < no_d)
+3. Lambda adaptation differentiates environments (GridWorld: lambda_1=1.50, TextWorld: lambda_1=0.86, Riddle: lambda_1=0.95)
+4. Riddle D essential: SR(with_d) - SR(no_d) >= 40pp
 
 ## Validation Results
 
@@ -441,6 +507,8 @@ Adaptation speed: persist 9.3 steps / clear 6.8 steps (10x10), persist 17.0 / cl
 | 8 | Extended B→C lookahead helps in obstacle-rich tasks | PlannerBC beam search | **PASS** (5/5) |
 | 9 | Deconstruct stabilizes during task changes | Two-phase goal switch | **PASS** (5/5) |
 | TW | D is architecturally essential in semantic domains | TextWorld D-ablation + Persistence Theorem | **PASS** (9/9) |
+| RR | D essential in non-spatial propositional domain | Riddle Rooms D-ablation | **PASS** (100% vs 0%) |
+| SM | Universal stability across 3 environments | Cross-env stability matrix (8 assertions) | **PASS** (8/8) |
 
 ## Running the Tests
 
@@ -517,6 +585,9 @@ python eval/run_kernel_jung.py
 
 # LLM-D loop gain validation (requires Ollama)
 python eval/run_kernel_llm_loop_gain.py
+
+# Closure Residuum (Delta_8) analysis
+python eval/run_residuum_analysis.py
 ```
 
 ### TextWorld D-Essentiality Tests
@@ -535,6 +606,16 @@ python eval/run_textworld_ablation.py --scenario 0 --n 30
 python eval/run_textworld_loop_gain.py
 ```
 
+### Cross-Environment Stability Matrix
+
+```bash
+# 3-environment stability matrix (GridWorld + TextWorld + Riddle Rooms)
+python eval/run_stability_matrix.py
+
+# Custom episode count
+python eval/run_stability_matrix.py --n 30
+```
+
 ### Legacy Ablation Studies
 
 ```bash
@@ -549,31 +630,41 @@ All results are written as CSV to `runs/`.
 
 ```
 agents/
-  agent_a.py          # Stream A: Perception (obs -> zA)
-  agent_b.py          # Stream B: Dynamics (zA, action -> zA_next)
-  agent_c.py          # Stream C: Valence/Control (scoring + tie-break)
-  agent_d.py          # Stream D: Deterministic narrative
-  agent_d_llm.py      # Stream D: LLM-backed narrative (Ollama/Mistral)
+  agent_a.py          # Stream A: Perception (obs -> zA) [extends StreamA]
+  agent_b.py          # Stream B: Dynamics (zA, action -> zA_next) [extends StreamB]
+  agent_c.py          # Stream C: Valence/Control (scoring + tie-break) [extends StreamC]
+  agent_d.py          # Stream D: Deterministic narrative [extends StreamD]
+  agent_d_llm.py      # Stream D: LLM-backed narrative (Ollama/Mistral) [extends StreamD]
   agent_d_interpreter.py  # Stream D: Extended D with coded hint interpretation
   agent_d_llm_interpreter.py  # Stream D: LLM narrative + deterministic hint interpretation
   planner_bc.py       # B→C planning extension: multi-step beam-search lookahead
-  text_agent_a.py     # TextWorld A: room observation -> ZA pseudo-position
-  text_agent_b.py     # TextWorld B: graph-based forward model
-  text_agent_c.py     # TextWorld C: BFS graph-distance scoring + claim action
-  text_agent_d.py     # TextWorld D: deterministic constraint propagation over clues
-  text_agent_d_llm.py # TextWorld D: LLM-backed clue synthesis (Ollama)
+  text_agent_a.py     # TextWorld A: room observation -> ZA pseudo-position [extends StreamA]
+  text_agent_b.py     # TextWorld B: graph-based forward model [extends StreamB]
+  text_agent_c.py     # TextWorld C: BFS graph-distance scoring + claim action [extends StreamC]
+  text_agent_d.py     # TextWorld D: deterministic constraint propagation over clues [extends StreamD]
+  text_agent_d_llm.py # TextWorld D: LLM-backed clue synthesis (Ollama) [extends StreamD]
+  riddle_agent_a.py   # Riddle Rooms A: evidence hash -> pseudo-position [extends StreamA]
+  riddle_agent_b.py   # Riddle Rooms B: forward model for test/submit [extends StreamB]
+  riddle_agent_c.py   # Riddle Rooms C: info-value scoring + submit [extends StreamC]
+  riddle_agent_d.py   # Riddle Rooms D: constraint propagation over clues [extends StreamD]
 
 env/
   gridworld.py        # Parametrizable GridWorld (variable size, multi-goal, dynamic obstacles)
+  gridworld_adapter.py # GridWorldAdapter(EnvironmentAdapter) for eval scripts
   coded_hints.py      # HintEncoder + CodedGridWorld wrapper for semantic ambiguity
   task_change.py      # TaskChangeGridWorld: two-phase wrapper with mid-episode goal switch
   textworld.py        # TextWorld: Clue Rooms environment (5 scenarios, claim mechanic)
+  textworld_adapter.py # TextWorldAdapter(EnvironmentAdapter) for eval scripts
+  riddle_rooms.py     # Riddle Rooms: 5 propositional logic puzzles (no navigation)
+  riddle_adapter.py   # RiddleRoomsAdapter(EnvironmentAdapter) for eval scripts
 
 kernel/
-  kernel.py           # MvpKernel: in-process governance orchestrator
-  types.py            # MvpTickSignals, MvpKernelDecision, MvpLoopGain, MvpTickResult
+  interfaces.py       # Abstract base classes: StreamA, StreamB, StreamC, StreamD, EnvironmentAdapter
+  kernel.py           # MvpKernel: in-process governance orchestrator (typed against interfaces)
+  types.py            # MvpTickSignals, MvpKernelDecision, MvpLoopGain, MvpTickResult, ResidualSnapshot
   abi.py              # ABI constraints (AB always, gating, max 1 extra coupling)
   closure_core.py     # Closure invariant validation (4 assertions per tick)
+  closure_residuum.py # Closure Residuum (Delta_8): c_term + d_term with dynamic thresholds
   scheduler.py        # Coupling schedule templates (4FoM/6FoM/8FoM rotation)
   memory_manager.py   # L3 persistent memory with D->C->B pipeline
   loop_gain.py        # Loop gain tracker (G = g_BA * g_CB * g_DC * g_AD)
@@ -584,6 +675,7 @@ router/
   router.py           # Router with regime logging (3D/3D+/4D transitions)
   deconstruct.py      # D->C knowledge transfer (multi-goal support)
   deconstruct_text.py # TextWorld D->C pipeline (target tag to pseudo-position)
+  deconstruct_riddle.py # Riddle Rooms D->C pipeline (answer/target tags to memory)
   deconstruct_plan.py # Plan->C transfer (tie_break_preference)
 
 state/
@@ -616,6 +708,8 @@ eval/
   run_kernel_loop_gain.py              # Kernel: loop gain G/F convergence
   run_kernel_jung.py                   # Kernel: Jung profile behavioral comparison
   run_kernel_llm_loop_gain.py          # Kernel: LLM-D loop gain validation
+  run_residuum_analysis.py             # Kernel: Closure Residuum (Delta_8) analysis
+  run_stability_matrix.py             # Cross-env: 3-environment stability matrix (8 assertions)
   run_textworld_ablation.py            # TextWorld: D-ablation (with_d/no_d/random/llm)
   run_textworld_loop_gain.py           # TextWorld: Persistence Theorem (g_DC progression, G/F)
   run_ablation_hidden_goal.py           # Legacy: hidden goal ablation
@@ -629,6 +723,10 @@ main.py               # Phase 3b demo (on-demand D + tie-break)
 
 ## Key Design Decisions
 
+- **Stream Interfaces**: All agents inherit from abstract base classes in `kernel/interfaces.py`. The kernel depends only on `StreamA/B/C/D` -- never on domain-specific implementations. New environments implement the same 4 ABCs
+- **GoalTarget Protocol**: Uses `typing.Protocol` (structural subtyping) so `GoalSpec` (dataclass) and `_TextGoalProxy` satisfy the contract without inheritance
+- **EnvironmentAdapter**: Eval-script convenience class. The kernel does NOT depend on it. Standardizes reset, step, make_agents, get_deconstruct_fn, inject_obs_metadata
+- **ZA universality**: ZA fields (width/height as state-space dimensions, agent_pos as current state, obstacles as blocked states, hint as external info) are generic enough for any discrete environment. TextWorld maps rooms to `(room_index, 0)`, Riddle Rooms maps evidence states to `(hash % n_answers, 0)`
 - Agent D is expensive (LLM call) so the router gates it adaptively rather than calling every step
 - Hint extraction from D's narrative is enforced deterministically in `deconstruct.py` regardless of LLM output quality
 - `ZC.memory` is episode-scoped via an `episode_id` key to prevent cross-episode leakage
@@ -636,13 +734,15 @@ main.py               # Phase 3b demo (on-demand D + tie-break)
 - Multi-goal hint cells use a partition system: each hint divides goals into two groups, and the environment dynamically computes which group to eliminate based on the true goal
 - MvpKernel governance rules are transport-independent -- same ABI as rapa_os but via in-process Python calls instead of ZMQ
 - D runs out-of-band (6FoM+D overlay): D is never in the coupling schedule, communicates only via deconstruction
+- **Closure Residuum (Delta_8)**: `c_term` (Manhattan distance to goal) + `d_term` (narrative quality). Dynamic thresholds derived from Jung profile weights and schedule topology
 - Loop gain g_AD = 1.0 for deterministic D; for LLM-D, concrete grounding checks validate hint consistency, position consistency, goal-mode consistency, and tag patterns
 - Jung profiles modulate kernel parameters (cooldown, stuck_window, tie_break_delta) without changing agent implementations
 - L3 memory persists across episodes (cross-episode learning); per-episode state is reset via `kernel.reset_episode()`
-- TextWorld uses pseudo-positions `(room_index, 0)` to satisfy ZA interface without kernel changes
 - TextWorld requires explicit `"claim"` action -- prevents accidental success without D's target identification
+- Riddle Rooms has no navigation graph -- state transitions are logical (test/submit), not spatial. Proves the architecture is not bound to movement
 - `MvpMemoryManager` accepts optional `deconstruct_fn` for domain-specific D->C pipelines (GridWorld default preserved)
 - Loop gain uses dynamic actions from `scored` list and `has_agent_d` flag to correctly model D-absent configurations
+- **fallback_actions**: Kernel accepts optional `fallback_actions` list for domain-agnostic AB-only action selection (defaults to GridWorld's up/down/left/right)
 
 ## Conceptual Note
 

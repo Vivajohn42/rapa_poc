@@ -1,6 +1,8 @@
 from state.schema import ZA
+from kernel.interfaces import StreamA
 
-class AgentA:
+
+class AgentA(StreamA):
     def infer_zA(self, obs) -> ZA:
         return ZA(
             width=obs.width,

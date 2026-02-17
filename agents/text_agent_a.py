@@ -7,9 +7,10 @@ from __future__ import annotations
 from typing import Dict, List
 
 from state.schema import ZA
+from kernel.interfaces import StreamA
 
 
-class TextAgentA:
+class TextAgentA(StreamA):
     """Parse TextWorld observation dict into ZA."""
 
     def __init__(self, room_index: Dict[str, int], n_rooms: int):

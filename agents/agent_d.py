@@ -2,6 +2,8 @@ from dataclasses import dataclass
 from typing import List, Dict, Any
 
 from state.schema import ZA, ZD
+from kernel.interfaces import StreamD
+
 
 @dataclass
 class Event:
@@ -12,7 +14,8 @@ class Event:
     done: bool
     hint: str | None
 
-class AgentD:
+
+class AgentD(StreamD):
     """
     Narrative/Meaning Agent (M+N). MVP ohne LLM:
     - sammelt Events

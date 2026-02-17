@@ -16,7 +16,10 @@ class Event:
     hint: Optional[str]
 
 
-class AgentDLLM:
+from kernel.interfaces import StreamD
+
+
+class AgentDLLM(StreamD):
     """
     LLM-backed D:
     - consumes grounded events (facts buffer)

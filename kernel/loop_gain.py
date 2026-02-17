@@ -24,8 +24,17 @@ from kernel.types import MvpLoopGain
 KNOWN_TAG_PREFIXES = frozenset({
     "goal:", "hint:", "target:", "micro", "success", "no_success",
     "short_episode", "long_episode", "stability:", "not_", "empty",
-    "clue_collected:", "candidates:",  # TextWorld D tags
+    "clue_collected:", "candidates:",       # TextWorld D tags
+    "answer:", "eliminated:", "evidence:",  # Riddle Rooms D tags
 })
+
+# Deterministic D narrative prefixes (non-LLM)
+DETERMINISTIC_NARRATIVE_PREFIXES = (
+    "Episode summary:", "Micro-summary",      # GridWorld D
+    "Episode synthesis:", "Micro-synthesis:",  # TextWorld D
+    "Riddle synthesis:", "Riddle micro:",      # Riddle Rooms D
+    "No events recorded.",                     # Empty D
+)
 
 
 class MvpLoopGainTracker:
@@ -327,14 +336,10 @@ class MvpLoopGainTracker:
 
     def _has_llm_markers(self, zD) -> bool:
         """Detect if ZD was produced by an LLM (vs deterministic D)."""
-        # LLM-produced narratives tend to be longer and more varied
-        # Deterministic D always sets grounding_violations=0
-        # The LLM D (agent_d_llm.py) may have non-zero grounding_violations
-        # or its narrative style differs. For safety, also check length.
         if zD.grounding_violations > 0:
             return True
-        # Heuristic: deterministic D's narrative follows a rigid template
-        if zD.narrative.startswith("Episode summary:") or zD.narrative.startswith("Micro-summary"):
+        # Deterministic D's narrative follows rigid template prefixes
+        if any(zD.narrative.startswith(p) for p in DETERMINISTIC_NARRATIVE_PREFIXES):
             return False
         return True  # Assume LLM if template doesn't match
 

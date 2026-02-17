@@ -14,6 +14,7 @@ from typing import List, Optional, Dict, Any, Tuple
 VALID_REASONS = frozenset({
     "EPISODE_END", "MEM_BUDGET", "DRIFT",
     "MARGINAL_GAIN_LOW", "WAYPOINT_FOUND",
+    "RESIDUUM_DIVERGENCE",
 })
 
 # All possible pairwise couplings
@@ -128,11 +129,35 @@ class MvpLoopGain:
 
 
 @dataclass
+class ResidualSnapshot:
+    """Per-tick closure residuum metrics.
+
+    Δ₈ = √(Δ₄² + λ₁·c_term² + λ₂·d_term²)
+    At fixpoint all three terms are zero.
+    """
+    delta_4: float = 0.0       # Prediction error (B model vs actual world)
+    c_term: float = 0.0        # Valence-reference alignment
+    d_term: float = 0.0        # Meaning-structure alignment
+    delta_6: float = 0.0       # √(Δ₄² + λ₁·c²) — 6 FoM residuum
+    delta_8: float = 0.0       # √(Δ₄² + λ₁·c² + λ₂·d²) — 8 FoM residuum
+    d_delta_8_dt: float = 0.0  # Rate of change of Δ₈
+    lambda_1: float = 1.0      # C-term weight
+    lambda_2: float = 1.0      # D-term weight
+    tick: int = 0
+    # Dynamic threshold diagnostics
+    sigma_delta_8: float = 0.0   # Rolling sigma of Δ₈
+    F_delta_8: float = 0.0       # EMA baseline of Δ₈
+    divergence_thr: float = 0.0  # Current divergence threshold (own sigma * I/E)
+    activation_thr: float = 0.0  # Current D-activation threshold (F * S/N ratio)
+
+
+@dataclass
 class MvpTickResult:
     """Result of a single MvpKernel.tick() call."""
     action: str
     scored: Optional[List] = None       # C's scored action list
     decision: Optional[MvpKernelDecision] = None
     gain: Optional[MvpLoopGain] = None
+    residual: Optional[ResidualSnapshot] = None  # Closure residuum Δ₈
     d_activated: bool = False
     decon_fired: bool = False

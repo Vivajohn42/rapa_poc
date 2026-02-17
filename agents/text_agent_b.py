@@ -7,9 +7,10 @@ from __future__ import annotations
 from typing import Dict
 
 from state.schema import ZA
+from kernel.interfaces import StreamB
 
 
-class TextAgentB:
+class TextAgentB(StreamB):
     """Deterministic room-graph forward model."""
 
     def __init__(

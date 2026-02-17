@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import List, Tuple, Optional, Any, Dict
 
 from state.schema import ZA
+from kernel.interfaces import StreamC
 
 ACTIONS = ("up", "down", "left", "right")
 
@@ -12,7 +13,7 @@ class GoalSpec:
     target: Tuple[int, int]  # usually zA.goal_pos
 
 
-class AgentC:
+class AgentC(StreamC):
     """
     Valence/Goal Agent:
     - bewertet Aktionen relativ zu einem Ziel (seek/avoid)
@@ -23,8 +24,16 @@ class AgentC:
     def __init__(self, goal: GoalSpec, anti_stay_penalty: float = 0.25):
         if goal.mode not in ("seek", "avoid"):
             raise ValueError("goal.mode must be 'seek' or 'avoid'")
-        self.goal = goal
+        self._goal = goal
         self.anti_stay_penalty = float(anti_stay_penalty)
+
+    @property
+    def goal(self) -> GoalSpec:
+        return self._goal
+
+    @goal.setter
+    def goal(self, value: GoalSpec) -> None:
+        self._goal = value
 
     @staticmethod
     def _manhattan(a: Tuple[int, int], b: Tuple[int, int]) -> int:

@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
 
 from state.schema import ZA, ZD
+from kernel.interfaces import StreamD
 
 
 @dataclass
@@ -28,7 +29,7 @@ class TextEvent:
     clue: Optional[str]
 
 
-class TextAgentD:
+class TextAgentD(StreamD):
     """Deterministic clue synthesizer via constraint propagation."""
 
     def __init__(
