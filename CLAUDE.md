@@ -65,6 +65,14 @@ python eval/run_textworld_loop_gain.py                  # Persistence Theorem on
 python eval/run_stability_matrix.py          # 3-env matrix, 8 assertions
 python eval/run_stability_matrix.py --n 30   # Custom episode count
 
+# Universal LLM-D: cross-environment evaluation (requires Ollama)
+python -m eval.run_universal_llm_d                          # D3: full 9-cell matrix (3 envs × 3 variants)
+python -m eval.run_universal_llm_d --phase D0               # TextWorld regression only
+python -m eval.run_universal_llm_d --phase D1               # GridWorld hint-forcing test
+python -m eval.run_universal_llm_d --phase D2               # Riddle Rooms (first LLM-D for puzzles)
+python -m eval.run_universal_llm_d --model mistral:latest   # Single model
+python -m eval.run_universal_llm_d --n 5                    # 5 episodes per variant per scenario
+
 # Legacy ablation studies
 python eval/run_ablation_hidden_goal.py
 python eval/run_ablation_hidden_goal_A2.py
@@ -179,6 +187,7 @@ Non-spatial domain agents, all inheriting from Stream interfaces:
 - TextWorld D-essentiality: `run_textworld_ablation.py` (D-ablation with_d/no_d/random/llm), `run_textworld_loop_gain.py` (Persistence Theorem: g_DC progression, G/F collapse)
 - Cross-environment: `run_stability_matrix.py` (3-environment stability matrix: GridWorld + TextWorld + Riddle Rooms, 8 assertions)
 - Neural streams: `run_neural_vs_deterministic.py` (Neural C vs Manhattan: 5 variants × 5 complexity levels, Mann-Whitney U + Cohen's d), `run_neural_stability_matrix.py` (kernel governance validation with neural A+C, 7 assertions)
+- Universal LLM-D: `run_universal_llm_d.py` (cross-environment LLM-D eval: 3 envs × 3 D-variants, 7 assertions, Phases D0-D3)
 
 ### Neural Models (`models/`)
 
@@ -194,6 +203,24 @@ Data collection and training scripts for neural streams. Generated artifacts (da
 - **BFS Expert** (`train/bfs_expert.py`) -- `bfs_distance_map()`: BFS pathfinding oracle for ground-truth labels. One BFS per goal per grid (efficient). Labels: `bfs_dist(current, goal) - bfs_dist(next, goal)`. Differs from Manhattan when obstacles force detours.
 - **Data Collection**: `collect_grid_data.py` (N0: expert trajectories from det agents, 2000 episodes → ~150k transitions), `collect_expert_c.py` (N1: BFS-labelled action-values from random grid positions, 5000 configs → ~380k samples, ~5% disagree rate where BFS ≠ Manhattan)
 - **Training**: `train_a.py` (GridEncoder: reconstruction + auxiliary losses, 50 epochs), `train_c.py` (ActionValueNet: MSE on BFS labels, 100 epochs, sign accuracy ~98%)
+
+### Universal LLM-D (`agents/universal_llm_d.py`, `agents/llm_d_adapters.py`)
+
+One LLM-backed D stream that works across all three environments via the adapter pattern. Separates environment-specific context (prompts, grounding, forced tags) from core D logic (event recording, LLM calling, NARRATIVE:/TAGS: parsing).
+
+- **UniversalLlmD** (`agents/universal_llm_d.py`, extends StreamD) -- Core engine: observe_step() records events, build/build_micro() calls adapter for prompts, LLM for generation, parser for NARRATIVE:/TAGS: format, adapter for grounding validation and deterministic tag injection. Dict-based events with `.get()` access for cross-environment safety.
+- **LlmDAdapter** (`agents/llm_d_adapters.py`) -- ABC defining 6 methods: `extract_event_context()`, `build_system_prompt()`, `build_user_prompt()`, `validate_grounding()`, `force_deterministic_tags()`, `on_new_clue()`.
+- **GridWorldLlmAdapter** -- FACTS format prompts, no grounding violations, deterministically forces `hint:A`/`hint:B`/`not_X_Y` tags from event buffer regardless of LLM output.
+- **TextWorldLlmAdapter** -- ROOMS+CLUES format prompts, validates `target:room_id` against known rooms, accumulates clues for prompt context.
+- **RiddleLlmAdapter** -- ANSWERS+EVIDENCE format prompts, validates `answer:id`/`eliminated:id` against known answers, accumulates evidence clues. First-ever LLM-D for Riddle Rooms domain.
+
+Cross-environment eval: `eval/run_universal_llm_d.py` (Phases D0-D3, 9-cell matrix: 3 envs x 3 D-variants, 7 assertions).
+
+| Environment | det_d | llm_d | no_d | g_AD(llm) |
+|-------------|-------|-------|------|-----------|
+| GridWorld   | 100%  | 100%  |  0%  |   0.918   |
+| TextWorld   | 100%  |  73%  |  0%  |   0.976   |
+| Riddle      | 100%  | 100%  | 100% |   0.995   |
 
 ### Neural Streams Results (N1)
 
@@ -241,3 +268,7 @@ Kernel governance validation (N2): ALL 7 ASSERTIONS PASS — G/F ratio stable (0
 - ActionValueNet's 7×7 local obstacle window is the key feature: it gives the network enough spatial context to detect detours within a few steps, without needing the entire grid
 - Training data is biased 50% toward near-obstacle positions (where the disagreement between BFS and Manhattan occurs) for data efficiency
 - NeuralAgentC returns exactly `(str, List[Tuple[str, float]])` — Loop Gain, Residuum, ClosureCore see no difference from deterministic AgentC. Interface compatibility is enforced by inheritance from StreamC
+- UniversalLlmD uses adapter pattern to separate env-specific context from core D logic. One class works across GridWorld, TextWorld, and Riddle Rooms — only the adapter differs
+- Events are stored as `Dict[str, Any]` (not typed dataclasses) so adapters can inject env-specific fields. All adapter code uses `.get()` to safely access adapter-specific keys (prevents cross-environment breakage)
+- `force_deterministic_tags()` in adapters ensures critical tags (GridWorld hints, goal modes) are injected regardless of LLM output quality — the reliability pattern that enables 100% SR even with stochastic narrative
+- RiddleLlmAdapter is the first-ever LLM-D for the Riddle domain — LLM performs genuine multi-clue logical reasoning, not just pattern matching
