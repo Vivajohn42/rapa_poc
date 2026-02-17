@@ -44,6 +44,17 @@ python eval/run_kernel_jung.py               # Jung personality profiles
 python eval/run_kernel_llm_loop_gain.py      # LLM-D loop gain (requires Ollama)
 python eval/run_residuum_analysis.py         # Closure Residuum (Delta_8) analysis
 
+# Neural streams: training pipeline (N0-N1)
+python -m train.collect_grid_data --episodes 2000 --out train/data/grid_expert.json   # N0: expert trajectories
+python -m train.train_a --data train/data/grid_expert.json --epochs 50               # N0: GridEncoder training
+python -m train.collect_expert_c --episodes 5000 --out train/data/expert_c.json      # N1: BFS-labelled action values
+python -m train.train_c --data train/data/expert_c.json --epochs 100                 # N1: ActionValueNet training
+
+# Neural streams: evaluation
+python eval/run_neural_vs_deterministic.py --n 100       # N1: Neural C vs Manhattan (5 variants × 5 levels)
+python eval/run_neural_vs_deterministic.py --n 50 --quick  # Quick: only 5x5 and 10x10 levels
+python eval/run_neural_stability_matrix.py --n 50        # N2: Kernel governance validation with neural streams
+
 # TextWorld: D-essentiality validation
 python eval/run_textworld_ablation.py                  # D-ablation (with_d vs no_d vs random)
 python eval/run_textworld_ablation.py --llm             # Include LLM-D variant (requires Ollama)
@@ -65,6 +76,7 @@ No formal test suite, linter, or build system is configured. Validation is empir
 ## Prerequisites
 
 - Python 3.10+ with `pydantic`, `requests`, `tqdm`
+- **PyTorch** (`pip install torch`) for neural streams (N0-N2). CPU-only is sufficient for current model sizes (~5k-21k params)
 - **Ollama** running locally (`ollama serve`) for LLM-backed Agent D
 - Supported models: `phi3:mini` (3.8B), `mistral:latest` (7B), `qwen2.5:3b` (3B), `gemma2:2b` (2B)
 
@@ -91,6 +103,8 @@ The agents form a perception->prediction->valuation->narrative+planning pipeline
 - **Agent D-Interpreter** (`agents/agent_d_interpreter.py`) -- Extended D with coded hint interpretation capability.
 - **Agent D-LLM-Interpreter** (`agents/agent_d_llm_interpreter.py`) -- LLM narrative + deterministic HintEncoder for coded hint interpretation.
 - **PlannerBC** (`agents/planner_bc.py`) -- B→C planning extension. Uses B's forward model for multi-step beam-search lookahead, feeding results into C's tie_break_preference. Not a new D-agent — deepens the existing B↔C coupling.
+- **NeuralAgentA** (`agents/neural_agent_a.py`, extends StreamA) -- Neural perception with GridEncoder belief embedding. Drop-in replacement for AgentA; attaches `ZA.embedding` (32-dim belief vector).
+- **NeuralAgentC** (`agents/neural_agent_c.py`, extends StreamC) -- BFS-trained action scoring. Hybrid: 70% neural (ActionValueNet with 7x7 local obstacle window) + 30% Manhattan. Dramatically outperforms Manhattan on obstacle-rich grids (95% vs 26% SR on 15x15).
 
 ### Shared State Schemas (`state/schema.py`)
 
@@ -164,6 +178,36 @@ Non-spatial domain agents, all inheriting from Stream interfaces:
 - Kernel governance tests: `run_kernel_smoke.py` (MvpKernel tick lifecycle), `run_kernel_loop_gain.py` (G/F convergence, weakest coupling), `run_kernel_jung.py` (Jung profile behavioral diff), `run_kernel_llm_loop_gain.py` (LLM-D loop gain validation), `run_residuum_analysis.py` (Closure Residuum Delta_8 analysis)
 - TextWorld D-essentiality: `run_textworld_ablation.py` (D-ablation with_d/no_d/random/llm), `run_textworld_loop_gain.py` (Persistence Theorem: g_DC progression, G/F collapse)
 - Cross-environment: `run_stability_matrix.py` (3-environment stability matrix: GridWorld + TextWorld + Riddle Rooms, 8 assertions)
+- Neural streams: `run_neural_vs_deterministic.py` (Neural C vs Manhattan: 5 variants × 5 complexity levels, Mann-Whitney U + Cohen's d), `run_neural_stability_matrix.py` (kernel governance validation with neural A+C, 7 assertions)
+
+### Neural Models (`models/`)
+
+Learned components for neural stream variants. All models are small MLPs (5k-21k params), trainable on CPU in seconds.
+
+- **GridEncoder** (`models/grid_encoder.py`) -- `GridEncoder(nn.Module)`: Full GridWorld state → 32-dim belief embedding. Input: binary obstacle grid (padded to 15×15 = 225) + normalized positions (4) + hint flag (1) + grid size norm (1) = 231 features. Architecture: 231→64→64→32 (~21k params). Trained via reconstruction + auxiliary goal-direction losses. Used by NeuralAgentA to populate `ZA.embedding`.
+- **ActionValueNet** (`models/action_value_net.py`) -- `ActionValueNet(nn.Module)`: (state, next_state, goal, local_obstacles) → scalar action value. Input: 7×7 local obstacle window (49) + normalized positions (4) + next delta (2) + manhattan delta (1) + wall hit (1) = 57 features. Architecture: 57→64→64→1 (~8k params). Trained on BFS-optimal labels (not Manhattan). Used by NeuralAgentC for obstacle-aware scoring.
+
+### Training Infrastructure (`train/`)
+
+Data collection and training scripts for neural streams. Generated artifacts (data, checkpoints) are .gitignored.
+
+- **BFS Expert** (`train/bfs_expert.py`) -- `bfs_distance_map()`: BFS pathfinding oracle for ground-truth labels. One BFS per goal per grid (efficient). Labels: `bfs_dist(current, goal) - bfs_dist(next, goal)`. Differs from Manhattan when obstacles force detours.
+- **Data Collection**: `collect_grid_data.py` (N0: expert trajectories from det agents, 2000 episodes → ~150k transitions), `collect_expert_c.py` (N1: BFS-labelled action-values from random grid positions, 5000 configs → ~380k samples, ~5% disagree rate where BFS ≠ Manhattan)
+- **Training**: `train_a.py` (GridEncoder: reconstruction + auxiliary losses, 50 epochs), `train_c.py` (ActionValueNet: MSE on BFS labels, 100 epochs, sign accuracy ~98%)
+
+### Neural Streams Results (N1)
+
+Head-to-head evaluation on obstacle-rich grids (key finding: neural C dramatically outperforms Manhattan where heuristic fails):
+
+| Level | det_c SR | neural_c SR | planner SR | neural+plan SR | p-value | Cohen's d |
+|-------|----------|-------------|------------|----------------|---------|-----------|
+| 5x5_2g | 100% | 100% | 100% | 100% | — | — |
+| 10x10_2g | 52% | 97% | 52% | 98% | 0.000*** | 1.20 |
+| 15x15_2g | 26% | 95% | 34% | 97% | 0.000*** | 1.98 |
+| 10x10_dyn | 72% | 100% | 84% | 100% | 0.000*** | — |
+| 15x15_4g | 39% | 90% | 53% | 94% | 0.000*** | 1.25 |
+
+Kernel governance validation (N2): ALL 7 ASSERTIONS PASS — G/F ratio stable (0.99), Delta_8 slightly improved, closure invariants held.
 
 ## Key Design Decisions
 
@@ -190,3 +234,10 @@ Non-spatial domain agents, all inheriting from Stream interfaces:
 - `loop_gain.py` uses dynamic actions from `scored` list (not hardcoded), and `has_agent_d` flag to correctly decay g_DC/g_AD when D is absent
 - g_DC detects target-in-memory via hint-capture path (not only via gD=1 route), ensuring accurate coupling measurement
 - Kernel accepts optional `fallback_actions` for domain-agnostic AB-only action selection
+- `ZA.embedding` is `Optional[List[float]] = None` — backward-compatible, all existing agents ignore it. Flows through kernel/loop_gain/residuum unchanged
+- Neural B was intentionally skipped: AgentB is a perfect deterministic forward model (knows grid rules). A neural B would only introduce prediction errors. The bottleneck is C's scoring, not B's prediction
+- BFS is used as training oracle (not A*): on unweighted grids, BFS = optimal shortest path. Labels = `bfs_dist(now, goal) - bfs_dist(next, goal)` — the true path improvement accounting for obstacles
+- NeuralAgentC uses hybrid scoring (`alpha * neural + (1-alpha) * manhattan`, alpha=0.7): Manhattan provides a stable gradient everywhere; neural component learns to see around obstacles via the 7×7 local window
+- ActionValueNet's 7×7 local obstacle window is the key feature: it gives the network enough spatial context to detect detours within a few steps, without needing the entire grid
+- Training data is biased 50% toward near-obstacle positions (where the disagreement between BFS and Manhattan occurs) for data efficiency
+- NeuralAgentC returns exactly `(str, List[Tuple[str, float]])` — Loop Gain, Residuum, ClosureCore see no difference from deterministic AgentC. Interface compatibility is enforced by inheritance from StreamC

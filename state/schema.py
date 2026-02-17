@@ -8,6 +8,7 @@ class ZA(BaseModel):
     goal_pos: Tuple[int, int]                  # visible goal (hidden => (-1,-1))
     obstacles: List[Tuple[int, int]]
     hint: Optional[str] = None                 # NEW
+    embedding: Optional[List[float]] = None    # Neural belief vector (N0)
 
 class ZC(BaseModel):
     goal_mode: str
