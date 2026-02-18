@@ -50,6 +50,10 @@ python -m train.train_a --data train/data/grid_expert.json --epochs 50          
 python -m train.collect_expert_c --episodes 5000 --out train/data/expert_c.json      # N1: BFS-labelled action values
 python -m train.train_c --data train/data/expert_c.json --epochs 100                 # N1: ActionValueNet training
 
+# Neural DoorKey C: training pipeline
+python -m train.collect_expert_doorkey --episodes 3000 --out train/data/expert_doorkey.json  # BFS+turn-cost labels
+python -m train.train_doorkey_c --data train/data/expert_doorkey.json --epochs 100           # DoorKeyActionValueNet training
+
 # Neural streams: evaluation
 python eval/run_neural_vs_deterministic.py --n 100       # N1: Neural C vs Manhattan (5 variants × 5 levels)
 python eval/run_neural_vs_deterministic.py --n 50 --quick  # Quick: only 5x5 and 10x10 levels
@@ -77,6 +81,11 @@ python -m eval.run_universal_llm_d --n 5                    # 5 episodes per var
 python eval/run_doorkey_ablation.py                    # DoorKey-6x6, 30 episodes, 5 assertions
 python eval/run_doorkey_ablation.py --size 5 --n 10    # smoke test on 5x5
 python eval/run_doorkey_ablation.py --n 50 --size 6    # 50 episodes
+
+# Neural DoorKey C evaluation (requires trained checkpoint)
+python eval/run_neural_doorkey_eval.py --n 50 --sizes 6,8     # standard (7 assertions)
+python eval/run_neural_doorkey_eval.py --n 10 --sizes 6        # smoke test
+python eval/run_neural_doorkey_eval.py --n 100 --sizes 6,8,16  # full evaluation
 
 # Legacy ablation studies
 python eval/run_ablation_hidden_goal.py
@@ -181,6 +190,7 @@ Rotation-based navigation agents for the MiniGrid DoorKey benchmark, all inherit
 - **DoorKeyAgentB** (`agents/doorkey_agent_b.py`, extends StreamB) -- Rotation-aware forward model. turn_left/right change direction, forward moves in facing direction with wall/door-blocking check. `update_door_state()` keeps door model current.
 - **DoorKeyAgentC** (`agents/doorkey_agent_c.py`, extends StreamC) -- BFS + turn-cost scoring. `_bfs_distance()` for wall-aware pathfinding, `_bfs_next_step()` for optimal first step, `_effective_distance() = bfs_dist + turns_to_face_first_step`. Pickup scores 3.0 when `target is not None AND phase==FIND_KEY AND facing==key_pos`. Toggle scores 3.0 when `target is not None AND phase==OPEN_DOOR AND carrying_key AND facing==door_pos`. Has `_DoorKeyGoalProxy` for kernel compatibility.
 - **DoorKeyAgentD** (`agents/doorkey_agent_d.py`, extends StreamD) -- Deterministic phase-aware narrative. Tags: `phase:{name}`, `target:{key|door|goal}`, `key_at:{x}_{y}`, `door_at:{x}_{y}`, `goal_at:{x}_{y}`, `carrying_key`, `door_open`, `progress:{0-2}`.
+- **NeuralDoorKeyAgentC** (`agents/neural_doorkey_agent_c.py`, extends StreamC) -- BFS-trained hybrid scoring. Navigation: 70% neural (DoorKeyActionValueNet with 65-dim features including direction, phase, carrying_key) + 30% BFS heuristic. Interaction: deterministic pickup/toggle rules identical to DoorKeyAgentC. D-essentiality preserved: pickup/toggle require `target is not None`. Achieves 100% SR on 6×6 (14.1 steps) and 8×8 (18.7 steps), matching deterministic C.
 - **`router/deconstruct_doorkey.py`** -- DoorKey-specific D→C pipeline: parses phase/position tags, sets `zC.memory["target"]` based on phase + discovered positions.
 
 ### Riddle Rooms Agents
@@ -206,7 +216,7 @@ Non-spatial domain agents, all inheriting from Stream interfaces:
 - Cross-environment: `run_stability_matrix.py` (3-environment stability matrix: GridWorld + TextWorld + Riddle Rooms, 8 assertions)
 - Neural streams: `run_neural_vs_deterministic.py` (Neural C vs Manhattan: 5 variants × 5 complexity levels, Mann-Whitney U + Cohen's d), `run_neural_stability_matrix.py` (kernel governance validation with neural A+C, 7 assertions)
 - Universal LLM-D: `run_universal_llm_d.py` (cross-environment LLM-D eval: 3 envs × 3 D-variants, 7 assertions, Phases D0-D3)
-- DoorKey: `run_doorkey_ablation.py` (D-essentiality ablation: with_d/no_d/random, 5 assertions, MiniGrid DoorKey-6x6)
+- DoorKey: `run_doorkey_ablation.py` (D-essentiality ablation: with_d/no_d/random, 5 assertions, MiniGrid DoorKey-6x6), `run_neural_doorkey_eval.py` (Neural C eval: det_c/neural_c/neural_c_no_d/random, 7 assertions, 6×6/8×8)
 
 ### Neural Models (`models/`)
 
@@ -214,14 +224,16 @@ Learned components for neural stream variants. All models are small MLPs (5k-21k
 
 - **GridEncoder** (`models/grid_encoder.py`) -- `GridEncoder(nn.Module)`: Full GridWorld state → 32-dim belief embedding. Input: binary obstacle grid (padded to 15×15 = 225) + normalized positions (4) + hint flag (1) + grid size norm (1) = 231 features. Architecture: 231→64→64→32 (~21k params). Trained via reconstruction + auxiliary goal-direction losses. Used by NeuralAgentA to populate `ZA.embedding`.
 - **ActionValueNet** (`models/action_value_net.py`) -- `ActionValueNet(nn.Module)`: (state, next_state, goal, local_obstacles) → scalar action value. Input: 7×7 local obstacle window (49) + normalized positions (4) + next delta (2) + manhattan delta (1) + wall hit (1) = 57 features. Architecture: 57→64→64→1 (~8k params). Trained on BFS-optimal labels (not Manhattan). Used by NeuralAgentC for obstacle-aware scoring.
+- **DoorKeyActionValueNet** (`models/doorkey_action_value_net.py`) -- `DoorKeyActionValueNet(nn.Module)`: rotation-aware action value estimation for DoorKey. Input: 7×7 local obstacle window (49) + normalized positions (4) + next delta (2) + heuristic delta (1) + wall hit (1) + direction one-hot (4) + phase one-hot (3) + carrying_key flag (1) = 65 features. Architecture: 65→64→64→1 (~8.4k params). Trained on BFS+turn-cost labels. Used by NeuralDoorKeyAgentC for navigation scoring.
 
 ### Training Infrastructure (`train/`)
 
 Data collection and training scripts for neural streams. Generated artifacts (data, checkpoints) are .gitignored.
 
 - **BFS Expert** (`train/bfs_expert.py`) -- `bfs_distance_map()`: BFS pathfinding oracle for ground-truth labels. One BFS per goal per grid (efficient). Labels: `bfs_dist(current, goal) - bfs_dist(next, goal)`. Differs from Manhattan when obstacles force detours.
-- **Data Collection**: `collect_grid_data.py` (N0: expert trajectories from det agents, 2000 episodes → ~150k transitions), `collect_expert_c.py` (N1: BFS-labelled action-values from random grid positions, 5000 configs → ~380k samples, ~5% disagree rate where BFS ≠ Manhattan)
-- **Training**: `train_a.py` (GridEncoder: reconstruction + auxiliary losses, 50 epochs), `train_c.py` (ActionValueNet: MSE on BFS labels, 100 epochs, sign accuracy ~98%)
+- **Data Collection**: `collect_grid_data.py` (N0: expert trajectories from det agents, 2000 episodes → ~150k transitions), `collect_expert_c.py` (N1: BFS-labelled action-values from random grid positions, 5000 configs → ~380k samples, ~5% disagree rate where BFS ≠ Manhattan), `collect_expert_doorkey.py` (DoorKey: BFS+turn-cost labels for rotation-based navigation, 3000 configs → ~1.47M samples, ~22% disagree rate, 3-phase sampling)
+- **Training**: `train_a.py` (GridEncoder: reconstruction + auxiliary losses, 50 epochs), `train_c.py` (ActionValueNet: MSE on BFS labels, 100 epochs, sign accuracy ~98%), `train_doorkey_c.py` (DoorKeyActionValueNet: MSE on BFS+turn-cost labels, 100 epochs, sign accuracy ~90%, val loss 0.134)
+- **BFS Expert DoorKey** (`train/bfs_expert_doorkey.py`) -- `effective_distance()`: BFS distance + turn-cost oracle for DoorKey rotation-based navigation labels. `compute_next_state()` mirrors DoorKeyAgentB.predict_next() for standalone label computation
 
 ### Universal LLM-D (`agents/universal_llm_d.py`, `agents/llm_d_adapters.py`)
 
@@ -254,6 +266,19 @@ Head-to-head evaluation on obstacle-rich grids (key finding: neural C dramatical
 | 15x15_4g | 39% | 90% | 53% | 94% | 0.000*** | 1.25 |
 
 Kernel governance validation (N2): ALL 7 ASSERTIONS PASS — G/F ratio stable (0.99), Delta_8 slightly improved, closure invariants held.
+
+### Neural DoorKey C Results
+
+BFS-trained hybrid scoring on DoorKey (7 assertions, ALL PASS):
+
+| Variant | 6×6 SR | 6×6 Steps | 8×8 SR | 8×8 Steps |
+|---------|--------|-----------|--------|-----------|
+| det_c | 100% | 14.3 | 100% | 19.1 |
+| neural_c | 100% | 14.1 | 100% | 18.7 |
+| neural_c_no_d | 0% | — | 0% | — |
+| random | 12% | — | 8% | — |
+
+Training: 1.47M samples, 8.4k params, sign accuracy 90.4%, val loss 0.134. Neural C matches det C and is marginally faster. D-essentiality preserved (0% without D).
 
 ## Key Design Decisions
 
@@ -294,3 +319,6 @@ Kernel governance validation (N2): ALL 7 ASSERTIONS PASS — G/F ratio stable (0
 - DoorKey D-Essentiality: `inject_obs_metadata` sets C's phase context (key_pos, door_pos, carrying_key) but NOT `memory["target"]`. Only D's deconstruction writes target. pickup/toggle require `target is not None` — without D, agent cannot interact with objects
 - DoorKey C uses BFS (not Manhattan) to handle wall obstacles, plus `_bfs_next_step()` for computing turns toward the BFS-optimal direction. Score = `1/(bfs_dist + turns + 1)`. Avoids infinite loops from wall-blind heuristics
 - `ZA.direction: Optional[int] = None` — backward-compatible extension for rotation-based environments (DoorKey). Existing agents ignore it
+- NeuralDoorKeyAgentC uses hybrid architecture: navigation (turn_left/right, forward) scored neurally, interaction (pickup, toggle) scored deterministically. This preserves D-essentiality by construction — pickup/toggle require `target is not None` which only D sets
+- DoorKeyActionValueNet's 65-dim features extend GridWorld's 57-dim with direction one-hot (4), phase one-hot (3), and carrying_key flag (1). The phase encoding disambiguates identical positions with different targets across the 3 DoorKey phases
+- DoorKey training data biased 50% near-wall + 25% near key/door + 25% random to maximize coverage of decision-relevant positions

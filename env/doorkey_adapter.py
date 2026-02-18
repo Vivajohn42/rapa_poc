@@ -16,6 +16,7 @@ from agents.doorkey_agent_a import DoorKeyAgentA
 from agents.doorkey_agent_b import DoorKeyAgentB
 from agents.doorkey_agent_c import DoorKeyAgentC
 from agents.doorkey_agent_d import DoorKeyAgentD
+from agents.neural_doorkey_agent_c import NeuralDoorKeyAgentC
 from env.doorkey import DOOR_OPEN, DoorKeyEnv
 from kernel.interfaces import (
     EnvironmentAdapter, StreamA, StreamB, StreamC, StreamD,
@@ -51,6 +52,7 @@ class DoorKeyAdapter(EnvironmentAdapter):
     def make_agents(
         self,
         variant: str = "with_d",
+        value_net=None,
     ) -> Tuple[StreamA, StreamB, StreamC, Optional[StreamD]]:
         A = DoorKeyAgentA()
         B = DoorKeyAgentB(
@@ -58,9 +60,19 @@ class DoorKeyAdapter(EnvironmentAdapter):
             door_open=False,
         )
         self._agent_b = B
-        C = DoorKeyAgentC(goal_mode="seek")
+
+        # Choose C variant: neural or deterministic
+        if variant in ("neural_c", "neural_c_no_d") and value_net is not None:
+            C: StreamC = NeuralDoorKeyAgentC(
+                value_net=value_net, goal_mode="seek",
+            )
+        else:
+            C = DoorKeyAgentC(goal_mode="seek")
+
         D: Optional[StreamD] = (
-            DoorKeyAgentD() if variant != "no_d" else None
+            DoorKeyAgentD()
+            if variant not in ("no_d", "neural_c_no_d")
+            else None
         )
         return A, B, C, D
 
@@ -83,7 +95,7 @@ class DoorKeyAdapter(EnvironmentAdapter):
             return
 
         c = kernel.agent_c
-        if isinstance(c, DoorKeyAgentC):
+        if isinstance(c, (DoorKeyAgentC, NeuralDoorKeyAgentC)):
             c.phase = obs.phase
             c.key_pos = obs.key_pos
             c.door_pos = obs.door_pos

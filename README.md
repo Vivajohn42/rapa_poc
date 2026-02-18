@@ -68,6 +68,7 @@ A (Perception) --> B (Dynamics) --> C (Valence/Control) --> Action
 | **DoorKeyAgentB** | DoorKey dynamics -- rotation-aware forward model with door blocking | `agents/doorkey_agent_b.py` |
 | **DoorKeyAgentC** | DoorKey control -- BFS + turn-cost scoring, 3-phase subgoal navigation | `agents/doorkey_agent_c.py` |
 | **DoorKeyAgentD** | DoorKey narrative -- deterministic phase-tracking, position/subgoal tags | `agents/doorkey_agent_d.py` |
+| **NeuralDoorKeyAgentC** | DoorKey Neural C -- BFS-trained hybrid navigation (70% neural + 30% BFS heuristic) + deterministic pickup/toggle | `agents/neural_doorkey_agent_c.py` |
 | **UniversalLlmD** | Universal LLM-backed D: one class, three environments via adapter pattern | `agents/universal_llm_d.py` |
 | **LlmDAdapters** | Environment-specific adapters: GridWorld (FACTS+hints), TextWorld (ROOMS+CLUES), Riddle (ANSWERS+EVIDENCE) | `agents/llm_d_adapters.py` |
 | **Deconstruct** | Deterministic translation of D-output into structured C-memory | `router/deconstruct.py` |
@@ -249,6 +250,37 @@ MiniGrid DoorKey-6x6: a rotation-based navigation task with sequential subgoals.
 3. with_d > random (100% > 10%)
 4. D-advantage >= 40pp (actual: 100pp)
 5. with_d avg_steps <= 50 (actual: 14.4)
+
+**Neural DoorKey C — BFS-Trained Hybrid Scoring:**
+
+Extends the GridWorld neural pattern to DoorKey: a `DoorKeyActionValueNet` (65→64→64→1, 8.4k params) trained on BFS+turn-cost labels replaces the handcoded BFS heuristic for navigation scoring. Interaction actions (pickup/toggle) remain deterministic, preserving D-essentiality by construction.
+
+Training: 1.47M samples from 3000 configs across sizes 5/6/8. Sign-accuracy: 90.4%, val-loss: 0.134.
+
+| Variant | 6×6 SR | 6×6 Steps | 8×8 SR | 8×8 Steps |
+|---------|:------:|:---------:|:------:|:---------:|
+| det_c | 100% | 14.3 | 100% | 19.1 |
+| neural_c | **100%** | **14.1** | **100%** | **18.7** |
+| neural_c_no_d | 0% | — | 0% | — |
+| random | 12% | — | 8% | — |
+
+7 Assertions (ALL PASS):
+1. neural_c SR >= 90% on 6×6 (actual: 100%)
+2. neural_c >= det_c - 5pp on 6×6 (parity)
+3. neural_c >= det_c on 8×8 (generalization)
+4. neural_c_no_d SR == 0% (D-essentiality)
+5. D-advantage >= 40pp (actual: 100pp)
+6. neural_c avg_steps <= 50 on 6×6 (actual: 14.1)
+7. random SR < 15% on 6×6 (actual: 12%)
+
+**Extended Benchmark Comparison:**
+
+| Approach | 6×6 SR | 8×8 SR | Training | Params | Diagnostics? |
+|----------|:------:|:------:|:--------:|:------:|:------------:|
+| PPO (Stable Baselines) | ~90% | ~80% | ~800k steps | ~50k | No |
+| LLM Direct (Claude 3.7) | 100% | — | 0 (zero-shot) | 100B+ | No |
+| **RAPA det C** | **100%** | **100%** | 0 (handcoded) | 0 | **Yes** |
+| **RAPA neural C** | **100%** | **100%** | 1.47M samples | 8.4k | **Yes** |
 
 ### Cross-Environment Stability Matrix
 
@@ -594,6 +626,7 @@ Adaptation speed: persist 9.3 steps / clear 6.8 steps (10x10), persist 17.0 / cl
 | SM | Universal stability across 3 environments | Cross-env stability matrix (8 assertions) | **PASS** (8/8) |
 | LLM-D | One LLM-D model works across all 3 environments | Universal LLM-D cross-env matrix (7 assertions) | **PASS** (7/7) |
 | DK | D essential for sequential subgoal coordination | DoorKey-6x6 D-essentiality ablation (5 assertions) | **PASS** (5/5) |
+| DK-N | Neural C matches det C on DoorKey, D-essentiality preserved | Neural DoorKey eval: 4 variants × 6×6/8×8 (7 assertions) | **PASS** (7/7) |
 
 ## Running the Tests
 
@@ -729,6 +762,19 @@ python eval/run_doorkey_ablation.py --size 5 --n 10     # smoke test on 5x5
 python eval/run_doorkey_ablation.py --max-steps 300     # longer timeout
 ```
 
+### Neural DoorKey C Evaluation
+
+```bash
+# Neural DoorKey C: det_c vs neural_c vs neural_c_no_d vs random (7 assertions)
+python eval/run_neural_doorkey_eval.py --n 50 --sizes 6,8     # standard
+python eval/run_neural_doorkey_eval.py --n 10 --sizes 6        # smoke test
+python eval/run_neural_doorkey_eval.py --n 100 --sizes 6,8,16  # full evaluation
+
+# DoorKey neural training pipeline
+python -m train.collect_expert_doorkey --episodes 3000 --out train/data/expert_doorkey.json
+python -m train.train_doorkey_c --data train/data/expert_doorkey.json --epochs 100
+```
+
 ### Legacy Ablation Studies
 
 ```bash
@@ -764,6 +810,7 @@ agents/
   doorkey_agent_b.py  # DoorKey B: rotation-aware forward model [extends StreamB]
   doorkey_agent_c.py  # DoorKey C: BFS + turn-cost scoring, 3-phase navigation [extends StreamC]
   doorkey_agent_d.py  # DoorKey D: deterministic phase-tracking narrative [extends StreamD]
+  neural_doorkey_agent_c.py  # DoorKey Neural C: BFS-trained hybrid nav + det interaction [extends StreamC]
   universal_llm_d.py  # Universal LLM-D: one class, three environments [extends StreamD]
   llm_d_adapters.py   # LlmDAdapter ABC + GridWorld/TextWorld/Riddle adapters
 
@@ -834,6 +881,7 @@ eval/
   run_stability_matrix.py             # Cross-env: 3-environment stability matrix (8 assertions)
   run_universal_llm_d.py              # Universal LLM-D: cross-env eval (3 envs × 3 variants, 7 assertions)
   run_doorkey_ablation.py             # DoorKey: D-essentiality ablation (with_d/no_d/random, 5 assertions)
+  run_neural_doorkey_eval.py          # DoorKey: Neural C eval (det_c/neural_c/neural_c_no_d/random, 7 assertions)
   run_textworld_ablation.py            # TextWorld: D-ablation (with_d/no_d/random/llm)
   run_textworld_loop_gain.py           # TextWorld: Persistence Theorem (g_DC progression, G/F)
   run_ablation_hidden_goal.py           # Legacy: hidden goal ablation
