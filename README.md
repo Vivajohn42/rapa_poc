@@ -10,11 +10,12 @@ The system demonstrates how transient perceptual information can be transformed 
 - A deterministic **Deconstruction interface**
 - A **Control stream** (C) with persistent memory
 
-The MVP is implemented in three environments:
+The MVP is implemented in four environments:
 
 - **GridWorld**: Partial observability with a hidden-goal task requiring knowledge acquisition. D is useful but optional.
 - **TextWorld**: Text-based "Clue Rooms" where D is architecturally essential. Without D, the agent cannot identify the target room (0% success). With D, constraint propagation over scattered clue fragments yields 100% success.
 - **Riddle Rooms**: Non-spatial propositional logic puzzles (no navigation). D is essential for constraint synthesis over clue fragments. Proves the architecture is not bound to spatial domains.
+- **DoorKey (MiniGrid)**: External gymnasium benchmark (DoorKey-6x6) with rotation-based movement and sequential subgoals (find key → open door → reach goal). D is essential for target coordination — without D's deconstruction pipeline, C has no navigation target and cannot activate pickup/toggle actions (0% success). With D, deterministic BFS-guided navigation achieves 100% success in 14.4 average steps.
 
 ## Architecture
 
@@ -63,11 +64,16 @@ A (Perception) --> B (Dynamics) --> C (Valence/Control) --> Action
 | **RiddleAgentB** | Riddle Rooms dynamics -- forward model for test/submit actions | `agents/riddle_agent_b.py` |
 | **RiddleAgentC** | Riddle Rooms control -- information value scoring + submit-when-target-known | `agents/riddle_agent_c.py` |
 | **RiddleAgentD** | Riddle Rooms narrative -- constraint propagation over clue fragments | `agents/riddle_agent_d.py` |
+| **DoorKeyAgentA** | DoorKey perception -- grid scan to ZA with direction field | `agents/doorkey_agent_a.py` |
+| **DoorKeyAgentB** | DoorKey dynamics -- rotation-aware forward model with door blocking | `agents/doorkey_agent_b.py` |
+| **DoorKeyAgentC** | DoorKey control -- BFS + turn-cost scoring, 3-phase subgoal navigation | `agents/doorkey_agent_c.py` |
+| **DoorKeyAgentD** | DoorKey narrative -- deterministic phase-tracking, position/subgoal tags | `agents/doorkey_agent_d.py` |
 | **UniversalLlmD** | Universal LLM-backed D: one class, three environments via adapter pattern | `agents/universal_llm_d.py` |
 | **LlmDAdapters** | Environment-specific adapters: GridWorld (FACTS+hints), TextWorld (ROOMS+CLUES), Riddle (ANSWERS+EVIDENCE) | `agents/llm_d_adapters.py` |
 | **Deconstruct** | Deterministic translation of D-output into structured C-memory | `router/deconstruct.py` |
 | **Deconstruct-Text** | TextWorld D->C pipeline (target tag to pseudo-position) | `router/deconstruct_text.py` |
 | **Deconstruct-Riddle** | Riddle Rooms D->C pipeline (answer/target tags to memory) | `router/deconstruct_riddle.py` |
+| **Deconstruct-DoorKey** | DoorKey D->C pipeline (phase/position tags to navigation target) | `router/deconstruct_doorkey.py` |
 | **Deconstruct-Plan** | Plan-to-C transfer (sets tie_break_preference) | `router/deconstruct_plan.py` |
 | **Router** | Activates D on demand; manages 3D/4D regime transitions; gates planner | `router/router.py` |
 
@@ -203,6 +209,46 @@ Each puzzle is a logic problem where individual clues are ambiguous -- only D's 
 | no_d | **0%** | C cannot distinguish submit actions, guesses randomly |
 
 **Reward schema**: -0.01/step, +0.1 new evidence, +1.0 correct submit, -0.3 wrong submit.
+
+### DoorKey (MiniGrid) -- External Gymnasium Benchmark
+
+MiniGrid DoorKey-6x6: a rotation-based navigation task with sequential subgoals. The agent must find a key, use it to open a locked door, then reach the goal cell. Uses rotation-based movement (turn_left, turn_right, forward) plus object interaction (pickup, toggle).
+
+**Three-phase subgoal mechanism:**
+
+| Phase | D-Tag | Deconstruct sets | C navigates to |
+|-------|-------|-----------------|----------------|
+| FIND_KEY | `target:key` | `memory["target"] = key_pos` | Key position |
+| OPEN_DOOR | `target:door` | `memory["target"] = door_pos` | Door position |
+| REACH_GOAL | `target:goal` | `memory["target"] = goal_pos` | Goal position |
+
+**D-Essentiality Design**: `inject_obs_metadata()` sets C's phase context (key_pos, door_pos, carrying_key) for scoring, but does NOT write `kernel.zC.memory["target"]`. Only D's deconstruction pipeline writes target. Without target, C cannot activate pickup/toggle actions (scored -1.0), making the task unsolvable.
+
+**C's BFS + Turn-Cost Scoring**: Navigation uses BFS shortest-path distance (not Manhattan) to account for walls, plus turns needed to face the BFS-optimal direction. Score = `1.0 / (bfs_distance + turns_to_first_step + 1)`. Pickup/toggle score 3.0 when conditions are met (correct phase, facing target, carrying key for toggle).
+
+**D-Essentiality Results (DoorKey-6x6, 30 seeds, ALL 5 ASSERTIONS PASS):**
+
+| Variant | SR | Avg Steps | Avg Reward |
+|---------|:---:|:---------:|:----------:|
+| with_d | **100%** | 14.4 | 0.957 |
+| no_d | **0%** | 200.0 | 0.000 |
+| random | 10% | 185.6 | 0.018 |
+
+**Benchmark Comparison:**
+
+| Approach | SR (6x6) | Training | Params | Full Diagnostics? |
+|----------|:--------:|:--------:|:------:|:-----------------:|
+| PPO (Stable Baselines) | ~90% | ~800k steps | ~50k | No |
+| LLM Direct (Claude 3.7) | 100% | 0 (zero-shot) | 100B+ | No |
+| LLM IPP (GPT-o3-mini) | 84% | 0 (iterative) | ~100B | No |
+| **RAPA (det Streams)** | **100%** | 0 (handcoded) | 0 | **Yes** (Delta_8, G/F, Loop Gain) |
+
+5 Assertions:
+1. with_d SR >= 90% (actual: 100%)
+2. with_d > no_d (100% > 0%)
+3. with_d > random (100% > 10%)
+4. D-advantage >= 40pp (actual: 100pp)
+5. with_d avg_steps <= 50 (actual: 14.4)
 
 ### Cross-Environment Stability Matrix
 
@@ -547,6 +593,7 @@ Adaptation speed: persist 9.3 steps / clear 6.8 steps (10x10), persist 17.0 / cl
 | RR | D essential in non-spatial propositional domain | Riddle Rooms D-ablation | **PASS** (100% vs 0%) |
 | SM | Universal stability across 3 environments | Cross-env stability matrix (8 assertions) | **PASS** (8/8) |
 | LLM-D | One LLM-D model works across all 3 environments | Universal LLM-D cross-env matrix (7 assertions) | **PASS** (7/7) |
+| DK | D essential for sequential subgoal coordination | DoorKey-6x6 D-essentiality ablation (5 assertions) | **PASS** (5/5) |
 
 ## Running the Tests
 
@@ -554,11 +601,12 @@ Adaptation speed: persist 9.3 steps / clear 6.8 steps (10x10), persist 17.0 / cl
 
 - Python 3.10+
 - `pydantic`, `requests`, `tqdm`
+- `minigrid` (for DoorKey benchmark -- pulls `gymnasium` as dependency)
 - **Ollama** running locally (`ollama serve`) for LLM-backed D (Stufe 7)
 - Supported models: `phi3:mini` (3.8B), `mistral:latest` (7B), `qwen2.5:3b` (3B), `gemma2:2b` (2B)
 
 ```bash
-pip install pydantic requests tqdm
+pip install pydantic requests tqdm minigrid
 ```
 
 ### Main Demo
@@ -669,6 +717,18 @@ python -m eval.run_universal_llm_d --phase D2    # Riddle Rooms (first LLM-D for
 python -m eval.run_universal_llm_d --model mistral:latest --n 5
 ```
 
+### DoorKey D-Essentiality Ablation
+
+```bash
+# DoorKey-6x6 D-essentiality ablation (with_d vs no_d vs random, 5 assertions)
+python eval/run_doorkey_ablation.py
+
+# Custom settings
+python eval/run_doorkey_ablation.py --n 50 --size 6     # 50 episodes, 6x6
+python eval/run_doorkey_ablation.py --size 5 --n 10     # smoke test on 5x5
+python eval/run_doorkey_ablation.py --max-steps 300     # longer timeout
+```
+
 ### Legacy Ablation Studies
 
 ```bash
@@ -700,6 +760,10 @@ agents/
   riddle_agent_b.py   # Riddle Rooms B: forward model for test/submit [extends StreamB]
   riddle_agent_c.py   # Riddle Rooms C: info-value scoring + submit [extends StreamC]
   riddle_agent_d.py   # Riddle Rooms D: constraint propagation over clues [extends StreamD]
+  doorkey_agent_a.py  # DoorKey A: grid scan -> ZA with direction [extends StreamA]
+  doorkey_agent_b.py  # DoorKey B: rotation-aware forward model [extends StreamB]
+  doorkey_agent_c.py  # DoorKey C: BFS + turn-cost scoring, 3-phase navigation [extends StreamC]
+  doorkey_agent_d.py  # DoorKey D: deterministic phase-tracking narrative [extends StreamD]
   universal_llm_d.py  # Universal LLM-D: one class, three environments [extends StreamD]
   llm_d_adapters.py   # LlmDAdapter ABC + GridWorld/TextWorld/Riddle adapters
 
@@ -712,6 +776,8 @@ env/
   textworld_adapter.py # TextWorldAdapter(EnvironmentAdapter) for eval scripts
   riddle_rooms.py     # Riddle Rooms: 5 propositional logic puzzles (no navigation)
   riddle_adapter.py   # RiddleRoomsAdapter(EnvironmentAdapter) for eval scripts
+  doorkey.py          # DoorKey: MiniGrid gymnasium wrapper (rotation, phases, belief map)
+  doorkey_adapter.py  # DoorKeyAdapter(EnvironmentAdapter) for eval scripts
 
 kernel/
   interfaces.py       # Abstract base classes: StreamA, StreamB, StreamC, StreamD, EnvironmentAdapter
@@ -731,6 +797,7 @@ router/
   deconstruct.py      # D->C knowledge transfer (multi-goal support)
   deconstruct_text.py # TextWorld D->C pipeline (target tag to pseudo-position)
   deconstruct_riddle.py # Riddle Rooms D->C pipeline (answer/target tags to memory)
+  deconstruct_doorkey.py # DoorKey D->C pipeline (phase/position tags to navigation target)
   deconstruct_plan.py # Plan->C transfer (tie_break_preference)
 
 state/
@@ -766,6 +833,7 @@ eval/
   run_residuum_analysis.py             # Kernel: Closure Residuum (Delta_8) analysis
   run_stability_matrix.py             # Cross-env: 3-environment stability matrix (8 assertions)
   run_universal_llm_d.py              # Universal LLM-D: cross-env eval (3 envs × 3 variants, 7 assertions)
+  run_doorkey_ablation.py             # DoorKey: D-essentiality ablation (with_d/no_d/random, 5 assertions)
   run_textworld_ablation.py            # TextWorld: D-ablation (with_d/no_d/random/llm)
   run_textworld_loop_gain.py           # TextWorld: Persistence Theorem (g_DC progression, G/F)
   run_ablation_hidden_goal.py           # Legacy: hidden goal ablation
@@ -801,6 +869,9 @@ main.py               # Phase 3b demo (on-demand D + tie-break)
 - **fallback_actions**: Kernel accepts optional `fallback_actions` list for domain-agnostic AB-only action selection (defaults to GridWorld's up/down/left/right)
 - **Universal LLM-D adapter pattern**: Separates env-specific context from core D logic. Events stored as `Dict[str, Any]` with `.get()` access for cross-environment safety. `force_deterministic_tags()` ensures critical tags are injected regardless of LLM output quality
 - **RiddleLlmAdapter**: First-ever LLM-D for the Riddle domain -- LLM performs genuine multi-clue logical reasoning, not just pattern matching. Achieves 100% SR (Mistral 7B)
+- **DoorKey D-Essentiality**: `inject_obs_metadata` sets C's phase context (key_pos, door_pos, carrying_key) but NOT `memory["target"]`. Only D's deconstruction writes target. pickup/toggle require `target is not None` to score positively -- without D, the agent has no navigation target and cannot interact with objects
+- **BFS + Turn-Cost Scoring**: DoorKey's C uses BFS (not Manhattan) to handle wall obstacles, plus `_bfs_next_step()` to determine the first cell on the optimal path for computing turn cost. Avoids infinite loops from wall-blind heuristics
+- **ZA.direction**: `Optional[int] = None` -- backward-compatible extension for rotation-based environments. Existing agents ignore it
 
 ## Conceptual Note
 

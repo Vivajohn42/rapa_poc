@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-RAPA MVP (Recursive Agent Planning Architecture) is a research codebase implementing a hierarchical agent architecture across three environments (GridWorld, TextWorld, Riddle Rooms). The system decomposes reasoning into specialized agents (A/B/C/D) that inherit from abstract interfaces (`kernel/interfaces.py`), with a governance kernel (`MvpKernel`) that enforces ABI constraints, coupling schedules, and closure invariants — ported from rapa_os but running in-process without ZMQ. Includes a B→C planning extension for multi-step lookahead. A 10-stage validation suite (Stufe 0-9) plus a 3-environment stability matrix tests core claims of the Dimensional Emergence Framework (DEF).
+RAPA MVP (Recursive Agent Planning Architecture) is a research codebase implementing a hierarchical agent architecture across four environments (GridWorld, TextWorld, Riddle Rooms, DoorKey). The system decomposes reasoning into specialized agents (A/B/C/D) that inherit from abstract interfaces (`kernel/interfaces.py`), with a governance kernel (`MvpKernel`) that enforces ABI constraints, coupling schedules, and closure invariants — ported from rapa_os but running in-process without ZMQ. Includes a B→C planning extension for multi-step lookahead. A 10-stage validation suite (Stufe 0-9) plus a 4-environment stability matrix tests core claims of the Dimensional Emergence Framework (DEF).
 
 ## Commands
 
@@ -73,6 +73,11 @@ python -m eval.run_universal_llm_d --phase D2               # Riddle Rooms (firs
 python -m eval.run_universal_llm_d --model mistral:latest   # Single model
 python -m eval.run_universal_llm_d --n 5                    # 5 episodes per variant per scenario
 
+# DoorKey D-essentiality ablation (requires minigrid)
+python eval/run_doorkey_ablation.py                    # DoorKey-6x6, 30 episodes, 5 assertions
+python eval/run_doorkey_ablation.py --size 5 --n 10    # smoke test on 5x5
+python eval/run_doorkey_ablation.py --n 50 --size 6    # 50 episodes
+
 # Legacy ablation studies
 python eval/run_ablation_hidden_goal.py
 python eval/run_ablation_hidden_goal_A2.py
@@ -84,6 +89,7 @@ No formal test suite, linter, or build system is configured. Validation is empir
 ## Prerequisites
 
 - Python 3.10+ with `pydantic`, `requests`, `tqdm`
+- `minigrid` (for DoorKey benchmark -- pulls `gymnasium` as dependency)
 - **PyTorch** (`pip install torch`) for neural streams (N0-N2). CPU-only is sufficient for current model sizes (~5k-21k params)
 - **Ollama** running locally (`ollama serve`) for LLM-backed Agent D
 - Supported models: `phi3:mini` (3.8B), `mistral:latest` (7B), `qwen2.5:3b` (3B), `gemma2:2b` (2B)
@@ -154,6 +160,8 @@ Three environments with EnvironmentAdapter wrappers for eval scripts:
 
 **Riddle Rooms** (`env/riddle_rooms.py`, `env/riddle_adapter.py`): Non-spatial propositional logic puzzles. No navigation graph — state transitions are logical (test/submit). 5 hand-crafted puzzles (Liar Boxes, Alibi Check, Sequence Rule, Schedule Puzzle, Inference Chain). D is essential for constraint synthesis. Results: with_d=100% SR, no_d=0% SR. Proves the architecture is not bound to spatial domains.
 
+**DoorKey** (`env/doorkey.py`, `env/doorkey_adapter.py`): MiniGrid DoorKey-6x6 gymnasium benchmark. Rotation-based movement (turn_left/turn_right/forward) plus object interaction (pickup/toggle). Sequential 3-phase subgoals: find key → open door → reach goal. D is essential — only D's deconstruction writes `zC.memory["target"]`, without which C cannot navigate or activate pickup/toggle. Results: with_d=100% SR (14.4 steps), no_d=0% SR, random=10% SR. BFS + turn-cost scoring handles wall obstacles. Requires `pip install minigrid`.
+
 ### TextWorld Agents
 
 Domain-specific agents for TextWorld, all inheriting from Stream interfaces:
@@ -164,6 +172,16 @@ Domain-specific agents for TextWorld, all inheriting from Stream interfaces:
 - **TextAgentD** (`agents/text_agent_d.py`, extends StreamD) -- Deterministic clue synthesizer via constraint propagation. Extracts required/negated properties from natural language clues, eliminates candidate rooms until one remains.
 - **TextAgentDLLM** (`agents/text_agent_d_llm.py`, extends StreamD) -- LLM-backed clue synthesis. Prompts LLM with room properties + collected clues to identify target. Validates grounding (hallucinated room detection).
 - **`router/deconstruct_text.py`** -- Text-specific D→C pipeline: maps `"target:room_id"` tag to pseudo-position in C's memory.
+
+### DoorKey Agents
+
+Rotation-based navigation agents for the MiniGrid DoorKey benchmark, all inheriting from Stream interfaces:
+
+- **DoorKeyAgentA** (`agents/doorkey_agent_a.py`, extends StreamA) -- Grid scan to ZA with `direction` field. Generates discovery hints: `key_at:{x}_{y}`, `door_at:{x}_{y}`, `goal_at:{x}_{y}`.
+- **DoorKeyAgentB** (`agents/doorkey_agent_b.py`, extends StreamB) -- Rotation-aware forward model. turn_left/right change direction, forward moves in facing direction with wall/door-blocking check. `update_door_state()` keeps door model current.
+- **DoorKeyAgentC** (`agents/doorkey_agent_c.py`, extends StreamC) -- BFS + turn-cost scoring. `_bfs_distance()` for wall-aware pathfinding, `_bfs_next_step()` for optimal first step, `_effective_distance() = bfs_dist + turns_to_face_first_step`. Pickup scores 3.0 when `target is not None AND phase==FIND_KEY AND facing==key_pos`. Toggle scores 3.0 when `target is not None AND phase==OPEN_DOOR AND carrying_key AND facing==door_pos`. Has `_DoorKeyGoalProxy` for kernel compatibility.
+- **DoorKeyAgentD** (`agents/doorkey_agent_d.py`, extends StreamD) -- Deterministic phase-aware narrative. Tags: `phase:{name}`, `target:{key|door|goal}`, `key_at:{x}_{y}`, `door_at:{x}_{y}`, `goal_at:{x}_{y}`, `carrying_key`, `door_open`, `progress:{0-2}`.
+- **`router/deconstruct_doorkey.py`** -- DoorKey-specific D→C pipeline: parses phase/position tags, sets `zC.memory["target"]` based on phase + discovered positions.
 
 ### Riddle Rooms Agents
 
@@ -188,6 +206,7 @@ Non-spatial domain agents, all inheriting from Stream interfaces:
 - Cross-environment: `run_stability_matrix.py` (3-environment stability matrix: GridWorld + TextWorld + Riddle Rooms, 8 assertions)
 - Neural streams: `run_neural_vs_deterministic.py` (Neural C vs Manhattan: 5 variants × 5 complexity levels, Mann-Whitney U + Cohen's d), `run_neural_stability_matrix.py` (kernel governance validation with neural A+C, 7 assertions)
 - Universal LLM-D: `run_universal_llm_d.py` (cross-environment LLM-D eval: 3 envs × 3 D-variants, 7 assertions, Phases D0-D3)
+- DoorKey: `run_doorkey_ablation.py` (D-essentiality ablation: with_d/no_d/random, 5 assertions, MiniGrid DoorKey-6x6)
 
 ### Neural Models (`models/`)
 
@@ -272,3 +291,6 @@ Kernel governance validation (N2): ALL 7 ASSERTIONS PASS — G/F ratio stable (0
 - Events are stored as `Dict[str, Any]` (not typed dataclasses) so adapters can inject env-specific fields. All adapter code uses `.get()` to safely access adapter-specific keys (prevents cross-environment breakage)
 - `force_deterministic_tags()` in adapters ensures critical tags (GridWorld hints, goal modes) are injected regardless of LLM output quality — the reliability pattern that enables 100% SR even with stochastic narrative
 - RiddleLlmAdapter is the first-ever LLM-D for the Riddle domain — LLM performs genuine multi-clue logical reasoning, not just pattern matching
+- DoorKey D-Essentiality: `inject_obs_metadata` sets C's phase context (key_pos, door_pos, carrying_key) but NOT `memory["target"]`. Only D's deconstruction writes target. pickup/toggle require `target is not None` — without D, agent cannot interact with objects
+- DoorKey C uses BFS (not Manhattan) to handle wall obstacles, plus `_bfs_next_step()` for computing turns toward the BFS-optimal direction. Score = `1/(bfs_dist + turns + 1)`. Avoids infinite loops from wall-blind heuristics
+- `ZA.direction: Optional[int] = None` — backward-compatible extension for rotation-based environments (DoorKey). Existing agents ignore it
