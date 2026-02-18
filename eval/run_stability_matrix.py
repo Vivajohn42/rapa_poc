@@ -1,15 +1,16 @@
 """Full Stability Matrix Validation: Delta_8 + G/F combined.
 
 Tests the complete stability picture: Closure Residuum (Delta_8) alongside
-Loop Gain (G/F) across GridWorld, TextWorld, and Riddle Rooms variants.
+Loop Gain (G/F) across GridWorld, TextWorld, Riddle Rooms, and DoorKey variants.
 
 Assertions:
   1. Delta_8 converges in successful episodes (dDelta_8/dt < 0 mean)
   2. with_d has lower Delta_8 than no_d overall
-  3. Per-environment: no_d Delta_8 > with_d Delta_8
+  3a-d. Per-environment: no_d Delta_8 > with_d Delta_8 (GW, TW, Riddle, DoorKey)
   4. TextWorld: Delta_8 reduction significant with D present
   5. dDelta_8/dt trigger fires sensibly (decon at divergence)
   6. Riddle Rooms: D is essential (SR delta >= 40pp)
+  7. DoorKey: D is essential (SR delta >= 40pp)
 
 Usage:
     python eval/run_stability_matrix.py
@@ -40,6 +41,7 @@ from agents.text_agent_d import TextAgentD
 from router.deconstruct_text import deconstruct_text_d_to_c
 from env.riddle_rooms import ALL_PUZZLES
 from env.riddle_adapter import RiddleRoomsAdapter
+from env.doorkey_adapter import DoorKeyAdapter
 from kernel.kernel import MvpKernel
 from kernel.types import ResidualSnapshot, MvpLoopGain
 
@@ -251,6 +253,51 @@ def run_riddle_episode(
 
 
 # ------------------------------------------------------------------
+# DoorKey
+# ------------------------------------------------------------------
+
+def run_dk_episode(
+    variant: str, seed: int, size: int = 6, max_steps: int = 200,
+) -> StabilityResult:
+    adapter = DoorKeyAdapter(size=size, seed=seed, max_steps=max_steps)
+    obs = adapter.reset()
+    A, B, C, D = adapter.make_agents(variant=variant)
+    decon_fn = adapter.get_deconstruct_fn()
+    goal_map = adapter.get_goal_map()
+
+    kernel = MvpKernel(
+        agent_a=A, agent_b=B, agent_c=C, agent_d=D,
+        goal_map=goal_map, enable_governance=True,
+        deconstruct_fn=decon_fn,
+        fallback_actions=adapter.available_actions(obs),
+    )
+    kernel.reset_episode(goal_mode="seek", episode_id=f"stab_dk_{variant}_{seed}")
+
+    done = False
+    decon_count = 0
+    resid_decon_count = 0
+    reward = 0.0
+    t = -1
+    for t in range(max_steps):
+        adapter.inject_obs_metadata(kernel, obs)
+        result = kernel.tick(t, obs, done=False)
+        if result.decon_fired:
+            decon_count += 1
+            if result.decision and "RESIDUUM_DIVERGENCE" in result.decision.reasons:
+                resid_decon_count += 1
+        obs, reward, done = adapter.step(result.action)
+        kernel.observe_reward(reward)
+        if done:
+            kernel.tick(t + 1, obs, done=True)
+            break
+
+    steps = (t + 1) if t >= 0 else 0
+    success = done and reward > 0
+    return _extract_stability("doorkey", variant, seed, success, steps,
+                               kernel, decon_count, resid_decon_count)
+
+
+# ------------------------------------------------------------------
 # Extraction
 # ------------------------------------------------------------------
 
@@ -376,6 +423,19 @@ def main():
         ddt = _mean([r.d_delta_8_dt_mean for r in ri_r])
         print(f"  {variant:<12s}: SR={sr:.1%}  D8={d8:.4f}  G/F={gf:.4f}  dD8/dt={ddt:.4f}")
 
+    # --- DoorKey ---
+    print("\n--- DoorKey ---")
+    for variant in ["with_d", "no_d"]:
+        for i in range(n):
+            r = run_dk_episode(variant, seed=42 + i, max_steps=200)
+            all_results.append(r)
+        dk_r = [r for r in all_results if r.env_type == "doorkey" and r.variant == variant]
+        sr = sum(1 for r in dk_r if r.success) / len(dk_r) if dk_r else 0
+        d8 = _mean([r.delta_8_mean for r in dk_r])
+        gf = _mean([r.G_over_F_mean for r in dk_r])
+        ddt = _mean([r.d_delta_8_dt_mean for r in dk_r])
+        print(f"  {variant:<12s}: SR={sr:.1%}  D8={d8:.4f}  G/F={gf:.4f}  dD8/dt={ddt:.4f}")
+
     # ================================================================
     # Assertions
     # ================================================================
@@ -434,6 +494,15 @@ def main():
     print(f"  3c. [{'PASS' if p3c else 'FAIL'}] Riddle D reduces residuum: "
           f"with_d={d8_ri_wd:.4f} < no_d={d8_ri_nd:.4f}")
 
+    # DoorKey
+    dk_wd = group("doorkey", "with_d")
+    dk_nd = group("doorkey", "no_d")
+    d8_dk_wd = _mean([r.delta_8_mean for r in dk_wd])
+    d8_dk_nd = _mean([r.delta_8_mean for r in dk_nd])
+    p3d = d8_dk_wd < d8_dk_nd
+    print(f"  3d. [{'PASS' if p3d else 'FAIL'}] DoorKey D reduces residuum: "
+          f"with_d={d8_dk_wd:.4f} < no_d={d8_dk_nd:.4f}")
+
     # 4. TextWorld: Delta_8 reduction significant with D
     tw_delta = d8_tw_nd - d8_tw_wd
     p4 = tw_delta >= 0.1
@@ -459,6 +528,14 @@ def main():
     print(f"\n  6. [{'PASS' if p6 else 'FAIL'}] Riddle D essential: "
           f"SR(with_d)={sr_ri_wd:.1%} - SR(no_d)={sr_ri_nd:.1%} = {sr_delta:.1%} (>= 40pp)")
 
+    # 7. DoorKey: D is essential (with_d SR >> no_d SR)
+    sr_dk_wd = sum(1 for r in dk_wd if r.success) / len(dk_wd) if dk_wd else 0
+    sr_dk_nd = sum(1 for r in dk_nd if r.success) / len(dk_nd) if dk_nd else 0
+    sr_dk_delta = sr_dk_wd - sr_dk_nd
+    p7 = sr_dk_delta >= 0.40
+    print(f"\n  7. [{'PASS' if p7 else 'FAIL'}] DoorKey D essential: "
+          f"SR(with_d)={sr_dk_wd:.1%} - SR(no_d)={sr_dk_nd:.1%} = {sr_dk_delta:.1%} (>= 40pp)")
+
     # --- Lambda adaptation ---
     print(f"\n  Lambda adaptation:")
     l1_gw = _mean([r.lambda_1_final for r in gw_wd])
@@ -467,15 +544,18 @@ def main():
     l2_tw = _mean([r.lambda_2_final for r in tw_wd])
     l1_ri = _mean([r.lambda_1_final for r in ri_wd])
     l2_ri = _mean([r.lambda_2_final for r in ri_wd])
+    l1_dk = _mean([r.lambda_1_final for r in dk_wd])
+    l2_dk = _mean([r.lambda_2_final for r in dk_wd])
     print(f"    GridWorld: lambda_1={l1_gw:.4f}  lambda_2={l2_gw:.4f}")
     print(f"    TextWorld: lambda_1={l1_tw:.4f}  lambda_2={l2_tw:.4f}")
     print(f"    Riddle:    lambda_1={l1_ri:.4f}  lambda_2={l2_ri:.4f}")
+    print(f"    DoorKey:   lambda_1={l1_dk:.4f}  lambda_2={l2_dk:.4f}")
 
     # --- Combined table ---
     print(f"\n  Combined Stability Matrix:")
     print(f"  {'Env':<12s} {'Var':<12s} {'SR':>6s} {'D8':>8s} {'G/F':>8s} "
           f"{'dD8/dt':>8s} {'D4':>8s} {'C':>8s} {'D':>8s}")
-    for env in ["gridworld", "textworld", "riddle"]:
+    for env in ["gridworld", "textworld", "riddle", "doorkey"]:
         for var in ["with_d", "no_d"]:
             vr = [r for r in all_results if r.env_type == env and r.variant == var]
             if not vr:
@@ -517,7 +597,7 @@ def main():
             ])
     print(f"\n  CSV: {csv_path}")
 
-    all_pass = p1 and p2 and p3a and p3b and p3c and p4 and p5 and p6
+    all_pass = p1 and p2 and p3a and p3b and p3c and p3d and p4 and p5 and p6 and p7
     print(f"\n  {'ALL PASS' if all_pass else 'SOME FAILED'}")
     print("=" * 75)
 
