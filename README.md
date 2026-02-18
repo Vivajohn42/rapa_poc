@@ -255,32 +255,34 @@ MiniGrid DoorKey-6x6: a rotation-based navigation task with sequential subgoals.
 
 Extends the GridWorld neural pattern to DoorKey: a `DoorKeyActionValueNet` (65→64→64→1, 8.4k params) trained on BFS+turn-cost labels replaces the handcoded BFS heuristic for navigation scoring. Interaction actions (pickup/toggle) remain deterministic, preserving D-essentiality by construction.
 
-Training: 1.47M samples from 3000 configs across sizes 5/6/8. Sign-accuracy: 90.4%, val-loss: 0.134.
+Training: 1.65M samples from 2000 configs across sizes 5/6/8/16. Sign-accuracy: 88.6%, val-loss: 0.154.
 
-| Variant | 6×6 SR | 6×6 Steps | 8×8 SR | 8×8 Steps |
-|---------|:------:|:---------:|:------:|:---------:|
-| det_c | 100% | 14.3 | 100% | 19.1 |
-| neural_c | **100%** | **14.1** | **100%** | **18.7** |
-| neural_c_no_d | 0% | — | 0% | — |
-| random | 12% | — | 8% | — |
+| Variant | 6×6 SR | 6×6 Steps | 8×8 SR | 8×8 Steps | 16×16 SR | 16×16 Steps |
+|---------|:------:|:---------:|:------:|:---------:|:--------:|:-----------:|
+| det_c | 100% | 14.3 | 100% | 19.1 | 100% | 34.9 |
+| neural_c | **100%** | **14.0** | **100%** | **18.4** | **94%** | 104.7 |
+| neural_c_no_d | 0% | — | 0% | — | 0% | — |
+| random | 12% | — | 8% | — | 0% | — |
 
 7 Assertions (ALL PASS):
 1. neural_c SR >= 90% on 6×6 (actual: 100%)
 2. neural_c >= det_c - 5pp on 6×6 (parity)
-3. neural_c >= det_c on 8×8 (generalization)
+3. neural_c SR >= 85% on 16×16 (actual: 94%)
 4. neural_c_no_d SR == 0% (D-essentiality)
 5. D-advantage >= 40pp (actual: 100pp)
-6. neural_c avg_steps <= 50 on 6×6 (actual: 14.1)
+6. neural_c avg_steps <= 50 on 6×6 (actual: 14.0)
 7. random SR < 15% on 6×6 (actual: 12%)
+
+**Key insight**: Unlike GridWorld (where neural C *exceeds* Manhattan because Manhattan is suboptimal around obstacles), DoorKey's det_c uses exact BFS — an optimal pathfinder. Neural C cannot beat an oracle, but achieves 94% SR on 16×16 (vs 100% det_c) with 3× more steps. On 6×6 and 8×8, neural C matches det_c exactly and is marginally faster.
 
 **Extended Benchmark Comparison:**
 
-| Approach | 6×6 SR | 8×8 SR | Training | Params | Diagnostics? |
-|----------|:------:|:------:|:--------:|:------:|:------------:|
-| PPO (Stable Baselines) | ~90% | ~80% | ~800k steps | ~50k | No |
-| LLM Direct (Claude 3.7) | 100% | — | 0 (zero-shot) | 100B+ | No |
-| **RAPA det C** | **100%** | **100%** | 0 (handcoded) | 0 | **Yes** |
-| **RAPA neural C** | **100%** | **100%** | 1.47M samples | 8.4k | **Yes** |
+| Approach | 6×6 SR | 8×8 SR | 16×16 SR | Training | Params | Diagnostics? |
+|----------|:------:|:------:|:--------:|:--------:|:------:|:------------:|
+| PPO (Stable Baselines) | ~90% | ~80% | — | ~800k steps | ~50k | No |
+| LLM Direct (Claude 3.7) | 100% | — | — | 0 (zero-shot) | 100B+ | No |
+| **RAPA det C** | **100%** | **100%** | **100%** | 0 (handcoded) | 0 | **Yes** |
+| **RAPA neural C** | **100%** | **100%** | **94%** | 1.65M samples | 8.4k | **Yes** |
 
 ### Cross-Environment Stability Matrix
 

@@ -231,8 +231,8 @@ Learned components for neural stream variants. All models are small MLPs (5k-21k
 Data collection and training scripts for neural streams. Generated artifacts (data, checkpoints) are .gitignored.
 
 - **BFS Expert** (`train/bfs_expert.py`) -- `bfs_distance_map()`: BFS pathfinding oracle for ground-truth labels. One BFS per goal per grid (efficient). Labels: `bfs_dist(current, goal) - bfs_dist(next, goal)`. Differs from Manhattan when obstacles force detours.
-- **Data Collection**: `collect_grid_data.py` (N0: expert trajectories from det agents, 2000 episodes → ~150k transitions), `collect_expert_c.py` (N1: BFS-labelled action-values from random grid positions, 5000 configs → ~380k samples, ~5% disagree rate where BFS ≠ Manhattan), `collect_expert_doorkey.py` (DoorKey: BFS+turn-cost labels for rotation-based navigation, 3000 configs → ~1.47M samples, ~22% disagree rate, 3-phase sampling)
-- **Training**: `train_a.py` (GridEncoder: reconstruction + auxiliary losses, 50 epochs), `train_c.py` (ActionValueNet: MSE on BFS labels, 100 epochs, sign accuracy ~98%), `train_doorkey_c.py` (DoorKeyActionValueNet: MSE on BFS+turn-cost labels, 100 epochs, sign accuracy ~90%, val loss 0.134)
+- **Data Collection**: `collect_grid_data.py` (N0: expert trajectories from det agents, 2000 episodes → ~150k transitions), `collect_expert_c.py` (N1: BFS-labelled action-values from random grid positions, 5000 configs → ~380k samples, ~5% disagree rate where BFS ≠ Manhattan), `collect_expert_doorkey.py` (DoorKey: BFS+turn-cost labels for rotation-based navigation, 2000 configs across sizes 5/6/8/16 → ~1.65M samples, ~20% disagree rate, 3-phase sampling, supports --pt for pre-extracted tensor output)
+- **Training**: `train_a.py` (GridEncoder: reconstruction + auxiliary losses, 50 epochs), `train_c.py` (ActionValueNet: MSE on BFS labels, 100 epochs, sign accuracy ~98%), `train_doorkey_c.py` (DoorKeyActionValueNet: MSE on BFS+turn-cost labels, 100 epochs, sign accuracy ~89%, val loss 0.154. Supports .pt input for fast loading of large datasets)
 - **BFS Expert DoorKey** (`train/bfs_expert_doorkey.py`) -- `effective_distance()`: BFS distance + turn-cost oracle for DoorKey rotation-based navigation labels. `compute_next_state()` mirrors DoorKeyAgentB.predict_next() for standalone label computation
 
 ### Universal LLM-D (`agents/universal_llm_d.py`, `agents/llm_d_adapters.py`)
@@ -271,14 +271,14 @@ Kernel governance validation (N2): ALL 7 ASSERTIONS PASS — G/F ratio stable (0
 
 BFS-trained hybrid scoring on DoorKey (7 assertions, ALL PASS):
 
-| Variant | 6×6 SR | 6×6 Steps | 8×8 SR | 8×8 Steps |
-|---------|--------|-----------|--------|-----------|
-| det_c | 100% | 14.3 | 100% | 19.1 |
-| neural_c | 100% | 14.1 | 100% | 18.7 |
-| neural_c_no_d | 0% | — | 0% | — |
-| random | 12% | — | 8% | — |
+| Variant | 6×6 SR | 6×6 Steps | 8×8 SR | 8×8 Steps | 16×16 SR | 16×16 Steps |
+|---------|--------|-----------|--------|-----------|----------|-------------|
+| det_c | 100% | 14.3 | 100% | 19.1 | 100% | 34.9 |
+| neural_c | 100% | 14.0 | 100% | 18.4 | 94% | 104.7 |
+| neural_c_no_d | 0% | — | 0% | — | 0% | — |
+| random | 12% | — | 8% | — | 0% | — |
 
-Training: 1.47M samples, 8.4k params, sign accuracy 90.4%, val loss 0.134. Neural C matches det C and is marginally faster. D-essentiality preserved (0% without D).
+Training: 1.65M samples (sizes 5/6/8/16), 8.4k params, sign accuracy 88.6%, val loss 0.154. Neural C matches det C on 6×6/8×8 (marginally faster), achieves 94% on 16×16. Key insight: DoorKey's det_c uses exact BFS (optimal), so neural C cannot exceed it — unlike GridWorld where neural C beats Manhattan. D-essentiality preserved (0% without D).
 
 ## Key Design Decisions
 

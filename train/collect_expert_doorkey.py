@@ -194,14 +194,20 @@ def collect_doorkey_samples(
 
 
 def random_doorkey_config(rng: random.Random) -> Dict[str, Any]:
-    """Generate a random DoorKey config (size + seed)."""
+    """Generate a random DoorKey config (size + seed).
+
+    Distribution: 5% size=5, 35% size=6, 30% size=8, 30% size=16.
+    Includes 16x16 for generalization to larger grids.
+    """
     r = rng.random()
-    if r < 0.10:
+    if r < 0.05:
         size = 5
-    elif r < 0.70:
+    elif r < 0.40:
         size = 6
-    elif r < 1.00:
+    elif r < 0.70:
         size = 8
+    else:
+        size = 16
     seed = rng.randint(0, 999999)
     return {"size": size, "seed": seed}
 
@@ -216,6 +222,8 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--out", type=str,
                         default="train/data/expert_doorkey.json")
+    parser.add_argument("--pt", action="store_true",
+                        help="Also save pre-extracted features as .pt file")
     args = parser.parse_args()
 
     rng = random.Random(args.seed)
@@ -260,6 +268,37 @@ def main():
           f"({n_disagree / max(len(all_samples), 1):.1%})")
     print(f"Phase distribution: {phase_counts}")
     print(f"Saved to: {out_path}")
+
+    # Optionally save pre-extracted features as .pt for fast training
+    if args.pt:
+        import torch
+        from models.doorkey_action_value_net import extract_doorkey_features
+
+        print(f"\nExtracting features for {len(all_samples)} samples...")
+        features_list = []
+        labels_list = []
+        for i, s in enumerate(all_samples):
+            feat = extract_doorkey_features(
+                agent_pos=tuple(s["agent_pos"]),
+                agent_dir=s["agent_dir"],
+                next_pos=tuple(s["next_pos"]),
+                next_dir=s["next_dir"],
+                target_pos=tuple(s["target_pos"]),
+                obstacles=[tuple(o) for o in s["obstacles"]],
+                width=s["width"], height=s["height"],
+                phase=s["phase"], carrying_key=s["carrying_key"],
+            )
+            features_list.append(feat)
+            labels_list.append(s["bfs_label"])
+            if (i + 1) % 500000 == 0:
+                print(f"  {i + 1}/{len(all_samples)} features extracted...")
+
+        X = torch.stack(features_list)
+        y = torch.tensor(labels_list, dtype=torch.float32).unsqueeze(1)
+        pt_path = out_path.with_suffix(".pt")
+        torch.save({"X": X, "y": y}, pt_path)
+        print(f"Features saved to: {pt_path} "
+              f"({X.shape[0]} samples, {X.shape[1]} dims)")
 
 
 if __name__ == "__main__":

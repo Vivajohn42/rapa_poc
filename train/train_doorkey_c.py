@@ -26,35 +26,63 @@ from models.doorkey_action_value_net import (
 )
 
 
-def prepare_data(data_path: str):
-    """Load JSON samples and prepare feature tensors + labels."""
+def _process_sample(sample: dict):
+    """Extract features and label from a single sample dict."""
+    feat = extract_doorkey_features(
+        agent_pos=tuple(sample["agent_pos"]),
+        agent_dir=sample["agent_dir"],
+        next_pos=tuple(sample["next_pos"]),
+        next_dir=sample["next_dir"],
+        target_pos=tuple(sample["target_pos"]),
+        obstacles=[tuple(o) for o in sample["obstacles"]],
+        width=sample["width"],
+        height=sample["height"],
+        phase=sample["phase"],
+        carrying_key=sample["carrying_key"],
+    )
+    return feat, sample["bfs_label"]
+
+
+def prepare_data(data_path: str, max_samples: int = 0):
+    """Load samples and prepare feature tensors + labels.
+
+    Supports two formats:
+    - .pt files: pre-extracted features (fast, recommended for large datasets)
+    - .json files: raw samples requiring feature extraction
+    """
     print(f"Loading data from {data_path}...")
-    with open(data_path) as f:
-        data = json.load(f)
 
-    print(f"  {len(data)} samples loaded")
+    if data_path.endswith(".pt"):
+        # Fast path: pre-extracted features
+        saved = torch.load(data_path, weights_only=True)
+        X, y = saved["X"], saved["y"]
+        if max_samples > 0 and len(X) > max_samples:
+            perm = torch.randperm(len(X))[:max_samples]
+            X, y = X[perm], y[perm]
+        print(f"  {len(X)} samples loaded from .pt file")
+    else:
+        # JSON path: extract features on the fly
+        with open(data_path) as f:
+            data = json.load(f)
 
-    features_list = []
-    labels_list = []
+        if max_samples > 0 and len(data) > max_samples:
+            import random
+            rng = random.Random(42)
+            data = rng.sample(data, max_samples)
 
-    for sample in data:
-        feat = extract_doorkey_features(
-            agent_pos=tuple(sample["agent_pos"]),
-            agent_dir=sample["agent_dir"],
-            next_pos=tuple(sample["next_pos"]),
-            next_dir=sample["next_dir"],
-            target_pos=tuple(sample["target_pos"]),
-            obstacles=[tuple(o) for o in sample["obstacles"]],
-            width=sample["width"],
-            height=sample["height"],
-            phase=sample["phase"],
-            carrying_key=sample["carrying_key"],
-        )
-        features_list.append(feat)
-        labels_list.append(sample["bfs_label"])
+        print(f"  {len(data)} raw samples, extracting features...")
+        features_list = []
+        labels_list = []
+        for i, sample in enumerate(data):
+            feat, label = _process_sample(sample)
+            features_list.append(feat)
+            labels_list.append(label)
+            if (i + 1) % 500000 == 0:
+                print(f"  {i + 1}/{len(data)} processed...")
 
-    X = torch.stack(features_list)
-    y = torch.tensor(labels_list, dtype=torch.float32).unsqueeze(1)
+        X = torch.stack(features_list)
+        y = torch.tensor(labels_list, dtype=torch.float32).unsqueeze(1)
+        print(f"  {len(X)} samples loaded")
 
     print(f"  Features: {X.shape}, Labels: {y.shape}")
     print(f"  Label range: [{y.min():.2f}, {y.max():.2f}]")
@@ -70,9 +98,10 @@ def train(
     lr: float = 1e-3,
     hidden: int = 64,
     checkpoint_path: str = "train/checkpoints/doorkey_action_value_net.pt",
+    max_samples: int = 0,
 ):
     """Train DoorKeyActionValueNet on BFS labels."""
-    X, y = prepare_data(data_path)
+    X, y = prepare_data(data_path, max_samples=max_samples)
 
     # 90/10 train/val split
     n = len(X)
@@ -171,6 +200,8 @@ def main():
     parser.add_argument("--hidden", type=int, default=64)
     parser.add_argument("--checkpoint", type=str,
                         default="train/checkpoints/doorkey_action_value_net.pt")
+    parser.add_argument("--max-samples", type=int, default=0,
+                        help="Max samples to use (0=all, useful for large datasets)")
     args = parser.parse_args()
 
     train(
@@ -180,6 +211,7 @@ def main():
         lr=args.lr,
         hidden=args.hidden,
         checkpoint_path=args.checkpoint,
+        max_samples=args.max_samples,
     )
 
 
