@@ -162,6 +162,7 @@ def run_gridworld_episode(
 
     done = False
     total_reward = 0.0
+    last_reward = 0.0
     d_activations = 0
     d_latency_total = 0.0
     decon_count = 0
@@ -194,6 +195,7 @@ def run_gridworld_episode(
 
         obs, reward, done = env.step(result.action)
         total_reward += reward
+        last_reward = reward
         kernel.observe_reward(reward)
 
         if done:
@@ -251,7 +253,7 @@ def run_gridworld_episode(
         model=model_name,
         scenario_id=0,
         seed=seed,
-        success=bool(done),
+        success=bool(done and last_reward > 0.5),
         steps=steps,
         total_reward=round(total_reward, 4),
         g_AD_mean=round(g_ad_mean, 4),
@@ -321,6 +323,7 @@ def run_textworld_episode(
 
     done = False
     total_reward = 0.0
+    last_reward = 0.0
     d_activations = 0
     d_latency_total = 0.0
     decon_count = 0
@@ -347,6 +350,7 @@ def run_textworld_episode(
 
         obs, reward, done = env.step(result.action)
         total_reward += reward
+        last_reward = reward
         kernel.observe_reward(reward)
 
         if done:
@@ -384,7 +388,7 @@ def run_textworld_episode(
         model=model_name,
         scenario_id=scenario_id,
         seed=seed,
-        success=bool(done),
+        success=bool(done and last_reward > 0.5),
         steps=steps,
         total_reward=round(total_reward, 4),
         g_AD_mean=round(g_ad_mean, 4),
@@ -479,6 +483,7 @@ def run_riddle_episode(
 
     done = False
     total_reward = 0.0
+    last_reward = 0.0
     d_activations = 0
     d_latency_total = 0.0
     decon_count = 0
@@ -505,6 +510,7 @@ def run_riddle_episode(
 
         obs, reward, done = env.step(result.action)
         total_reward += reward
+        last_reward = reward
         kernel.observe_reward(reward)
 
         if done:
@@ -542,7 +548,7 @@ def run_riddle_episode(
         model=model_name,
         scenario_id=puzzle_idx,
         seed=seed,
-        success=bool(done),
+        success=bool(done and last_reward > 0.5),
         steps=steps,
         total_reward=round(total_reward, 4),
         g_AD_mean=round(g_ad_mean, 4),

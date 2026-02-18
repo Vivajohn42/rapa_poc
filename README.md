@@ -165,7 +165,7 @@ Text-based environment where D is architecturally essential. A network of named 
 | Variant | SR | Steps | Target ID |
 |---------|:---:|:---:|:---:|
 | det-D | **100%** | 6.0 | 100% |
-| LLM-D (Mistral) | 52% | 26.5 | 84% |
+| LLM-D (Mistral) | 64% | 26.5 | 84% |
 | no-D | **0%** | 50.0 | 0% |
 | random | 42% | 39.4 | 0% |
 
@@ -242,18 +242,18 @@ UniversalLlmD (core)                 LlmDAdapter (context)
 
 | Env | det_d | llm_d | no_d | g_AD(llm) |
 |-----|:---:|:---:|:---:|:---:|
-| GridWorld | 100% | **100%** | 0% | 0.918 |
-| TextWorld | 100% | **73%** | 0% | 0.976 |
-| Riddle | 100% | **100%** | 100% | 0.995 |
+| GridWorld | 100% | **100%** | 0% | 0.919 |
+| TextWorld | 100% | **64%** | 0% | 0.983 |
+| Riddle | 100% | **72%** | 0% | 0.990 |
 
 7 Assertions:
-1. TextWorld LLM-D SR >= 40% (actual: 73%)
+1. TextWorld LLM-D SR >= 40% (actual: 64%)
 2. GridWorld forced hints in 100% of hint-relevant episodes
 3. g_AD(llm) <= g_AD(det) on all environments
 4. `_has_llm_markers()` detects all LLM-D variants (100%)
 5. Governance invariants held (100%)
-6. D-Essentiality: D matters on GridWorld + TextWorld (det > no_d)
-7. Riddle LLM-D SR > 0% (actual: 100%)
+6. D-Essentiality: D essential on all 3 environments (det > no_d, llm > no_d)
+7. Riddle LLM-D SR > 0% (actual: 72%)
 
 Key insight: `force_deterministic_tags()` in adapters ensures critical tags (GridWorld hints, goal modes) are injected regardless of LLM output quality -- the reliability pattern that enables 100% SR even with stochastic narrative.
 
@@ -520,9 +520,9 @@ Adaptation speed: persist 9.3 steps / clear 6.8 steps (10x10), persist 17.0 / cl
 
 **LLM-D (Mistral, 5 scenarios x 10 episodes):**
 - SR = 52% (between det-D 100% and no_d 0%) [TextAgentDLLM, original implementation]
-- SR = 73% with Universal LLM-D (TextWorldLlmAdapter, improved prompt design)
+- SR = 64% with Universal LLM-D (TextWorldLlmAdapter, improved prompt design)
 - Target ID = 84% (LLM synthesizes correctly in most cases)
-- g_AD = 0.976 (Universal LLM-D)
+- g_AD = 0.983 (Universal LLM-D)
 - Hardest scenario: Secret Lab (0% LLM SR -- "without machines" is semantically complex)
 
 **All 9 assertions PASS.**

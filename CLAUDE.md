@@ -218,9 +218,9 @@ Cross-environment eval: `eval/run_universal_llm_d.py` (Phases D0-D3, 9-cell matr
 
 | Environment | det_d | llm_d | no_d | g_AD(llm) |
 |-------------|-------|-------|------|-----------|
-| GridWorld   | 100%  | 100%  |  0%  |   0.918   |
-| TextWorld   | 100%  |  73%  |  0%  |   0.976   |
-| Riddle      | 100%  | 100%  | 100% |   0.995   |
+| GridWorld   | 100%  | 100%  |  0%  |   0.919   |
+| TextWorld   | 100%  |  64%  |  0%  |   0.983   |
+| Riddle      | 100%  |  72%  |  0%  |   0.990   |
 
 ### Neural Streams Results (N1)
 
