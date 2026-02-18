@@ -9,6 +9,7 @@ class ZA(BaseModel):
     obstacles: List[Tuple[int, int]]
     hint: Optional[str] = None                 # NEW
     embedding: Optional[List[float]] = None    # Neural belief vector (N0)
+    direction: Optional[int] = None            # Agent facing (0=R,1=D,2=L,3=U) — DoorKey
 
 class ZC(BaseModel):
     goal_mode: str

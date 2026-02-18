@@ -26,6 +26,8 @@ KNOWN_TAG_PREFIXES = frozenset({
     "short_episode", "long_episode", "stability:", "not_", "empty",
     "clue_collected:", "candidates:",       # TextWorld D tags
     "answer:", "eliminated:", "evidence:",  # Riddle Rooms D tags
+    "phase:", "key_at:", "door_at:", "goal_at:",  # DoorKey D tags
+    "carrying_key", "door_open", "progress:", "timeout",
 })
 
 # Deterministic D narrative prefixes (non-LLM)
@@ -33,6 +35,7 @@ DETERMINISTIC_NARRATIVE_PREFIXES = (
     "Episode summary:", "Micro-summary",      # GridWorld D
     "Episode synthesis:", "Micro-synthesis:",  # TextWorld D
     "Riddle synthesis:", "Riddle micro:",      # Riddle Rooms D
+    "DoorKey synthesis:", "DoorKey micro:",    # DoorKey D
     "No events recorded.",                     # Empty D
 )
 
