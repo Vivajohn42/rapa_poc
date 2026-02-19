@@ -111,6 +111,65 @@ class JungProfile:
         """
         return self.no_progress_window
 
+    # --- Compression parameters (RAPA v2: Unified Memory) ---
+
+    @property
+    def compression_threshold_l3(self) -> float:
+        """T/F axis -> L3->L2 compression threshold (d_term).
+
+        T(0.0)->0.10 (compresses D into C eagerly).
+        F(1.0)->0.30 (stays deliberative, preserves D richness).
+        """
+        return max(0.10, 0.10 + self.tf_weight * 0.20)
+
+    @property
+    def compression_threshold_l2(self) -> float:
+        """T/F axis -> L2->L1 compression threshold (c_term).
+
+        T(0.0)->0.05 (compresses C into B eagerly).
+        F(1.0)->0.25 (preserves valence richness longer).
+
+        Tight range: c_term in easy envs (DoorKey-6) is ~0.0-0.15,
+        so thresholds must be in this band to be selective.
+        """
+        return 0.05 + self.tf_weight * 0.20
+
+    @property
+    def compression_threshold_l1(self) -> float:
+        """S/N axis -> L1->L0 compression threshold (delta_4).
+
+        S(0.0)->0.15 (pushes corrections to perception eagerly).
+        N(1.0)->0.35 (trusts prediction model, cautious about reflex).
+
+        Tight range: delta_4 in easy envs is ~0.1-0.3,
+        so thresholds must be in this band to be selective.
+        """
+        return 0.15 + self.sn_weight * 0.20
+
+    @property
+    def compression_window(self) -> int:
+        """I/E axis -> compression cooldown window (ticks).
+
+        E(0.0)->2 (rapid adaptation).
+        I(1.0)->8 (deeper consolidation before next compression).
+        """
+        return max(2, round(2 + self.ie_weight * 6))
+
+    @property
+    def cascade_depth(self) -> int:
+        """S/N axis -> max compression stages per tick.
+
+        S(sn<0.3)->1 (single stage only, concrete).
+        balanced->2 (two-stage max).
+        N(sn>=0.7)->3 (full cascade, abstract).
+        """
+        if self.sn_weight >= 0.7:
+            return 3
+        elif self.sn_weight >= 0.3:
+            return 2
+        else:
+            return 1
+
 
 # ---------------------------------------------------------------------------
 # Pre-defined profiles
@@ -131,6 +190,42 @@ PROFILES: dict[str, JungProfile] = {
     ),
     "DEFAULT": JungProfile(
         "Default (balanced)",
+        ie_weight=0.5, sn_weight=0.5, tf_weight=0.5,
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
+# RAPA v2 profiles — Jungian Weights Matrix for Unified Memory evaluation
+# ---------------------------------------------------------------------------
+
+PROFILES_V2: dict[str, JungProfile] = {
+    "INTJ": JungProfile(
+        "Architect (INTJ)",
+        ie_weight=0.8, sn_weight=0.8, tf_weight=0.1,
+        # Ni-Te: large stability window (N), aggressive compression after (T)
+        # "Thinks long, then acts decisively"
+    ),
+    "ESFP": JungProfile(
+        "Performer (ESFP)",
+        ie_weight=0.1, sn_weight=0.1, tf_weight=0.8,
+        # Se-Fi: small stability window (S), cautious compression (F)
+        # "Reacts fast, stays flexible"
+    ),
+    "ISTJ": JungProfile(
+        "Inspector (ISTJ)",
+        ie_weight=0.8, sn_weight=0.1, tf_weight=0.1,
+        # Si-Te: small stability window (S), aggressive compression (T)
+        # "Fixes quickly on experience, forms reflex fast"
+    ),
+    "ENFP": JungProfile(
+        "Champion (ENFP)",
+        ie_weight=0.1, sn_weight=0.9, tf_weight=0.8,
+        # Ne-Fi: large stability window (N), cautious compression (F)
+        # "Explores long, reluctant to compress"
+    ),
+    "DEFAULT_V2": JungProfile(
+        "Default v2 (balanced)",
         ie_weight=0.5, sn_weight=0.5, tf_weight=0.5,
     ),
 }

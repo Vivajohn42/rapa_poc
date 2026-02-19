@@ -161,3 +161,4 @@ class MvpTickResult:
     residual: Optional[ResidualSnapshot] = None  # Closure residuum Δ₈
     d_activated: bool = False
     decon_fired: bool = False
+    compression_stages: List[str] = field(default_factory=list)  # e.g. ["L3_L2", "L2_L1"]

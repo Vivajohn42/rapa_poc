@@ -41,6 +41,8 @@ from kernel.memory_manager import MvpMemoryManager
 from kernel.loop_gain import MvpLoopGainTracker
 from kernel.closure_residuum import ClosureResiduum
 from kernel.interfaces import StreamA, StreamB, StreamC, StreamD
+from kernel.unified_memory import UnifiedMemory
+from kernel.compression import CompressionController
 
 from state.schema import ZC, ZD
 
@@ -77,6 +79,7 @@ class MvpKernel:
         deconstruct_cooldown_ticks: int = 3,
         deconstruct_fn=None,
         fallback_actions: Optional[List[str]] = None,
+        use_unified_memory: bool = False,
     ):
         self.agent_a = agent_a
         self.agent_b = agent_b
@@ -120,6 +123,17 @@ class MvpKernel:
             sn_weight=sn_weight,
         )
 
+        # Unified Memory + Cascaded Compression (RAPA v2)
+        self._unified_memory: Optional[UnifiedMemory] = None
+        self._compression: Optional[CompressionController] = None
+        if use_unified_memory:
+            self._unified_memory = UnifiedMemory()
+            self._compression = CompressionController(
+                um=self._unified_memory,
+                memory_manager=self._memory,
+                jung_profile=jung_profile,
+            )
+
         # Per-episode state
         self._last_decision_delta: Optional[float] = None
         self._last_positions: deque = deque(maxlen=20)
@@ -154,6 +168,12 @@ class MvpKernel:
 
         self._zC = ZC(goal_mode=goal_mode, memory={})
         self._zC.memory["episode_id"] = episode_id
+
+        # Reset Unified Memory + Compression per episode
+        if self._unified_memory is not None:
+            self._unified_memory.reset_episode()
+        if self._compression is not None:
+            self._compression.reset_episode()
 
         # Reset D's event buffer if present
         if self.agent_d is not None and hasattr(self.agent_d, "events"):
@@ -190,6 +210,10 @@ class MvpKernel:
         zA = self.agent_a.infer_zA(obs)
         self._last_positions.append(zA.agent_pos)
 
+        # UM shadow: sync L0 from A's perception
+        if self._unified_memory is not None:
+            self._unified_memory.populate_from_zA(zA, t)
+
         # ---- 2. Immediate hint capture (before routing) ----
         # If a hint is visible, capture it via D immediately
         if zA.hint is not None and self.agent_d is not None:
@@ -207,6 +231,9 @@ class MvpKernel:
             new_target = zC.memory.get("target")
             self._hint_just_learned = (new_target != old_target and new_target is not None)
             self._zC = zC
+            # UM shadow: sync L2 after hint deconstruction
+            if self._unified_memory is not None:
+                self._unified_memory.populate_from_zC(zC, t)
 
         # ---- 3. Compute signals ----
         stuck = self._is_stuck()
@@ -282,6 +309,9 @@ class MvpKernel:
                 last_n=5,
             )
             self._d_last_tags = list(zD.meaning_tags)
+            # UM shadow: sync L3 from D's analysis
+            if self._unified_memory is not None:
+                self._unified_memory.populate_from_zD(zD, t)
         elif self.agent_d is not None:
             # D observes but doesn't build (cheap recording)
             self.agent_d.observe_step(
@@ -297,6 +327,9 @@ class MvpKernel:
             self._zC = zC
             self._last_deconstruct_tick = t
             decon_fired = True
+            # UM shadow: sync L2 after deconstruction
+            if self._unified_memory is not None:
+                self._unified_memory.populate_from_zC(zC, t)
 
         # Episode-end deconstruction (full narrative via MemoryManager)
         if done and self.agent_d is not None:
@@ -306,6 +339,9 @@ class MvpKernel:
             zC = self._memory.deconstruct(zC, zD_final, goal_map=self.goal_map)
             zC.memory["episode_id"] = self._zC.memory.get("episode_id", "")
             self._zC = zC
+            # UM shadow: sync L2 after episode-end deconstruction
+            if self._unified_memory is not None:
+                self._unified_memory.populate_from_zC(zC, t)
 
         # ---- 11. Loop Gain (M4) ----
         d_seen = None
@@ -340,6 +376,25 @@ class MvpKernel:
             weakest_coupling=gain.weakest_coupling,
         )
 
+        # ---- 13. Cascaded Compression (RAPA v2 Unified Memory) ----
+        compression_stages: List[str] = []
+        if self._unified_memory is not None and self._compression is not None and residual is not None:
+            # Cache invalidation check (surprise → reactivate layers)
+            invalidated = self._compression.check_invalidation(
+                residual, divergence_threshold=self._residuum.divergence_threshold,
+            )
+
+            # Evaluate cascade compression
+            fired, zC_updated = self._compression.evaluate_cascade(
+                tick=t, residual=residual,
+                zC=zC, zD=zD, goal_map=self.goal_map,
+            )
+            compression_stages = fired
+            if zC_updated is not None:
+                self._zC = zC_updated
+                zC = zC_updated
+                decon_fired = True  # Legacy-compatible
+
         return MvpTickResult(
             action=action,
             scored=scored,
@@ -348,6 +403,7 @@ class MvpKernel:
             residual=residual,
             d_activated=d_activated,
             decon_fired=decon_fired,
+            compression_stages=compression_stages,
         )
 
     @property
@@ -370,6 +426,16 @@ class MvpKernel:
     def residuum(self) -> ClosureResiduum:
         """Closure residuum tracker (per-episode history)."""
         return self._residuum
+
+    @property
+    def unified_memory(self) -> Optional[UnifiedMemory]:
+        """Unified memory store (None if use_unified_memory=False)."""
+        return self._unified_memory
+
+    @property
+    def compression(self) -> Optional[CompressionController]:
+        """Compression controller (None if use_unified_memory=False)."""
+        return self._compression
 
     # ------------------------------------------------------------------
     # Private helpers
