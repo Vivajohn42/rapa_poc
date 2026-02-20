@@ -282,9 +282,11 @@ class MvpKernel:
         scored = None
         c_compressed = False
 
-        # Update C's target from memory
-        if "target" in zC.memory:
+        # Update C's target from memory (None = no target → frontier exploration)
+        if "target" in zC.memory and zC.memory["target"] is not None:
             self.agent_c.goal.target = tuple(zC.memory["target"])
+        elif "target" in zC.memory and zC.memory["target"] is None:
+            self.agent_c.goal.target = None
 
         # Active Mode: check if L2 is compressed → C runs in compressed mode
         # C only runs compressed if a target is known (direction_prior needs it)

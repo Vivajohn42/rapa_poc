@@ -69,6 +69,9 @@ A (Perception) --> B (Dynamics) --> C (Valence/Control) --> Action
 | **DoorKeyAgentC** | DoorKey control -- BFS + turn-cost scoring, 3-phase subgoal navigation | `agents/doorkey_agent_c.py` |
 | **DoorKeyAgentD** | DoorKey narrative -- deterministic phase-tracking, position/subgoal tags | `agents/doorkey_agent_d.py` |
 | **NeuralDoorKeyAgentC** | DoorKey Neural C -- BFS-trained hybrid navigation (70% neural + 30% BFS heuristic) + deterministic pickup/toggle | `agents/neural_doorkey_agent_c.py` |
+| **ObjectMemory** | DoorKey A-Level: ego-view world model (no privileged grid access), tracks objects, walls, frontier | `agents/object_memory.py` |
+| **EventPatternD** | DoorKey D: learns task sequence from experience (no labels, no LLM), cross-episode pattern extraction | `agents/event_pattern_d.py` |
+| **AutonomousDoorKeyAgentC** | DoorKey C: cost-weighted BFS on known grid + frontier exploration, positional interaction heuristics | `agents/autonomous_doorkey_agent_c.py` |
 | **UniversalLlmD** | Universal LLM-backed D: one class, three environments via adapter pattern | `agents/universal_llm_d.py` |
 | **LlmDAdapters** | Environment-specific adapters: GridWorld (FACTS+hints), TextWorld (ROOMS+CLUES), Riddle (ANSWERS+EVIDENCE) | `agents/llm_d_adapters.py` |
 | **Deconstruct** | Deterministic translation of D-output into structured C-memory | `router/deconstruct.py` |
@@ -283,6 +286,20 @@ Training: 1.65M samples from 2000 configs across sizes 5/6/8/16. Sign-accuracy: 
 | LLM Direct (Claude 3.7) | 100% | — | — | 0 (zero-shot) | 100B+ | No |
 | **RAPA det C** | **100%** | **100%** | **100%** | 0 (handcoded) | 0 | **Yes** |
 | **RAPA neural C** | **100%** | **100%** | **94%** | 1.65M samples | 8.4k | **Yes** |
+
+**Neural DoorKey C — Generalization & Init Variance Analysis:**
+
+The original checkpoint (trained on 5/6/8/16 sizes) generalizes perfectly to unseen 16×16 layouts across all seed schemes (100% SR). However, re-training with identical hyperparameters reveals significant init variance:
+
+| Experiment | Result | Insight |
+|------------|--------|---------|
+| Seed Diagnostic | 100% SR on 16×16 across 4 seed schemes | Feature architecture (65-dim size-invariant) generalizes intrinsically |
+| Multi-Seed Robustness (3 train seeds) | 76-94% SR, val_loss identical (~0.15) | Init lottery: flat vs sharp minima determine OOD generalization |
+| Sample Efficiency (500/1500/3000 configs) | 70-74% SR, no monotonic trend | Init variance dominates data size; 8×8 gate has zero selectivity |
+
+**Key finding**: In-distribution metrics (val_loss, 8×8 SR) cannot differentiate between checkpoints that vary 70-100% on 16×16. The feature architecture generalizes intrinsically, but offline MSE training does not reliably find the right minimum. This motivates online learning with governance — instead of searching offline for a minimum that happens to generalize, the agent learns online and self-corrects through episodic reprocessing.
+
+Eval scripts: `run_seed_diagnostic.py`, `run_generalization_robustness.py`, `run_sample_efficiency.py`.
 
 ### Cross-Environment Stability Matrix
 

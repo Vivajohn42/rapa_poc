@@ -71,18 +71,25 @@ def deconstruct_doorkey_d_to_c(
             except ValueError:
                 pass
 
-    # Set navigation target based on phase + discovered positions
+    # Set navigation target based on phase + discovered positions.
+    # If the required position isn't known yet, clear target so C
+    # falls back to frontier exploration instead of chasing a stale target.
     phase = zC.memory.get("phase", "find_key")
 
     if phase == "find_key" and "key_pos" in zC.memory:
         zC.memory["target"] = zC.memory["key_pos"]
-    elif phase == "open_door" and "door_pos" in zC.memory:
-        zC.memory["target"] = zC.memory["door_pos"]
+    elif phase == "open_door":
+        if "door_pos" in zC.memory:
+            zC.memory["target"] = zC.memory["door_pos"]
+        else:
+            zC.memory["target"] = None  # explore until door found
     elif phase == "reach_goal":
         if "goal_pos" in zC.memory:
             zC.memory["target"] = zC.memory["goal_pos"]
         elif goal_map and "goal" in goal_map:
             zC.memory["target"] = goal_map["goal"]
+        else:
+            zC.memory["target"] = None  # explore until goal found
 
     # Store narrative for introspection
     zC.memory["last_narrative"] = zD.narrative

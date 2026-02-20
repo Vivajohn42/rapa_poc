@@ -199,7 +199,7 @@ class DoorKeyAgentC(StreamC):
         the door from obstacles when computing distance to it (since the
         agent needs to reach the cell adjacent to the door, not through it).
         """
-        if memory and "target" in memory:
+        if memory and "target" in memory and memory["target"] is not None:
             return tuple(memory["target"])
         if self._goal.target is not None:
             return self._goal.target
