@@ -81,6 +81,7 @@ class MvpKernel:
         fallback_actions: Optional[List[str]] = None,
         use_unified_memory: bool = False,
         active_compression: bool = False,
+        online_distiller=None,
     ):
         self.agent_a = agent_a
         self.agent_b = agent_b
@@ -92,6 +93,21 @@ class MvpKernel:
         self._fallback_actions = fallback_actions
         self._active_compression = active_compression
         self._direction_prior_net = None  # Set via set_direction_prior_net()
+        self._online_distiller = online_distiller  # OnlineDistiller or None
+
+        # Replan-burst parameters (configurable via set_replan_burst_params)
+        self._replan_stuck_window: int = 5
+        self._replan_burst_length: int = 5
+
+        # Replan-burst per-episode state
+        self._replan_states: deque = deque(maxlen=20)  # (pos, dir) tuples
+        self._replan_burst_remaining: int = 0
+        self._replan_burst_count: int = 0
+
+        # Exploration-progress stuck detection: track new cells discovered
+        self._replan_known_cells_count: int = 0  # last known cell count
+        self._replan_no_progress_ticks: int = 0  # consecutive ticks with no new cells
+        self._replan_no_progress_threshold: int = 12  # ticks without new cells -> stuck
 
         # active_compression implies use_unified_memory
         if active_compression:
@@ -166,6 +182,17 @@ class MvpKernel:
         self._last_deconstruct_tick = -999
         self._hint_just_learned = False
         self._d_last_tags = []
+
+        # Reset replan-burst state
+        self._replan_states.clear()
+        self._replan_burst_remaining = 0
+        self._replan_burst_count = 0
+        self._replan_known_cells_count = 0
+        self._replan_no_progress_ticks = 0
+
+        # Reset online distiller episode buffer
+        if self._online_distiller is not None:
+            self._online_distiller.reset_episode()
 
         # Reset loop gain tracker per episode
         self._loop_gain.reset_episode()
@@ -288,7 +315,7 @@ class MvpKernel:
         elif "target" in zC.memory and zC.memory["target"] is None:
             self.agent_c.goal.target = None
 
-        # Active Mode: check if L2 is compressed → C runs in compressed mode
+        # Active Mode: check if L2 is compressed -> C runs in compressed mode
         # C only runs compressed if a target is known (direction_prior needs it)
         l2_compressed = (
             self._active_compression
@@ -298,14 +325,73 @@ class MvpKernel:
             and zC.memory.get("target") is not None
         )
 
-        if l2_compressed:
-            # C compressed: use direction prior from L1 instead of full C
-            action, scored = self._compressed_l2_action(zA)
-            c_compressed = True
+        burst_active = False  # True if this tick is a replan-burst tick
+
+        if l2_compressed and self._replan_burst_remaining > 0:
+            # Replan-burst: force C (full BFS) instead of compressed B
+            action, scored = self.agent_c.choose_action(
+                zA,
+                self.agent_b.predict_next,
+                memory=zC.memory,
+                tie_break_delta=self.tie_break_delta,
+            )
+            c_compressed = False  # C is deciding, not B
+            burst_active = True
+            self._replan_burst_remaining -= 1
             if len(scored) >= 2:
                 self._last_decision_delta = scored[0][1] - scored[1][1]
             else:
                 self._last_decision_delta = 0.0
+
+        elif l2_compressed:
+            # C compressed: use direction prior from L1 instead of full C
+            action, scored = self._compressed_l2_action(zA)
+            c_compressed = True
+
+            # Track (pos, dir) for stuck detection
+            direction = zA.direction if zA.direction is not None else 0
+            self._replan_states.append((zA.agent_pos, direction))
+
+            # Track exploration progress (new cells discovered)
+            self._update_exploration_progress()
+
+            # Check if B is stuck (position/direction loop OR no exploration progress)
+            trigger_burst = self._is_b_stuck()
+
+            # Also check online net confidence (low confidence -> burst)
+            if (not trigger_burst
+                    and self._online_distiller is not None
+                    and self._online_distiller.is_enabled):
+                target = zC.memory.get("target")
+                if target is not None:
+                    c_agent = self.agent_c
+                    phase_int = {"FIND_KEY": 0, "OPEN_DOOR": 1,
+                                 "REACH_GOAL": 2}.get(
+                        getattr(c_agent, "phase", "FIND_KEY"), 0)
+                    _, conf = self._online_distiller.predict(
+                        agent_pos=zA.agent_pos,
+                        target=tuple(target),
+                        agent_dir=direction,
+                        obstacles=set(zA.obstacles),
+                        width=zA.width,
+                        height=zA.height,
+                        phase=phase_int,
+                        carrying_key=getattr(c_agent, "carrying_key", False),
+                        door_open=getattr(c_agent, "door_open", False),
+                    )
+                    if conf < self._online_distiller.confidence_threshold:
+                        trigger_burst = True
+
+            if trigger_burst:
+                self._replan_burst_remaining = self._replan_burst_length
+                self._replan_burst_count += 1
+                self._replan_no_progress_ticks = 0  # reset after burst trigger
+
+            if len(scored) >= 2:
+                self._last_decision_delta = scored[0][1] - scored[1][1]
+            else:
+                self._last_decision_delta = 0.0
+
         elif gC == 1:
             # C active: use C's goal-directed action selection
             action, scored = self.agent_c.choose_action(
@@ -322,6 +408,50 @@ class MvpKernel:
             # AB only: use B's forward model with simple heuristic
             action = self._ab_only_action(zA)
             self._last_decision_delta = None
+
+        # Online distiller: collect teacher sample when C decides (not compressed)
+        if (self._online_distiller is not None
+                and not c_compressed
+                and gC == 1
+                and action is not None
+                and scored is not None):
+            # Get target from C's actual knowledge (not just zC.memory)
+            c_agent = self.agent_c
+            target = zC.memory.get("target") if zC else None
+            _is_frontier = False
+            if target is None:
+                # Fallback: derive from C's phase-specific state
+                c_phase = getattr(c_agent, "phase", "FIND_KEY")
+                if c_phase == "FIND_KEY":
+                    target = getattr(c_agent, "key_pos", None)
+                elif c_phase == "OPEN_DOOR":
+                    target = getattr(c_agent, "door_pos", None)
+                elif c_phase == "REACH_GOAL":
+                    target = zC.memory.get("goal_pos") if zC else None
+            if target is None:
+                # Frontier pseudo-target: use nearest frontier cell as proxy
+                # This enables distiller sample collection during exploration
+                # (the dominant phase on large grids like 16x16)
+                target = self._nearest_frontier_target(zA)
+                _is_frontier = (target is not None)
+            if target is not None:
+                phase_int = {"FIND_KEY": 0, "OPEN_DOOR": 1,
+                             "REACH_GOAL": 2}.get(
+                    getattr(c_agent, "phase", "FIND_KEY"), 0)
+                self._online_distiller.collect_sample(
+                    agent_pos=zA.agent_pos,
+                    target=tuple(target),
+                    agent_dir=zA.direction if zA.direction is not None else 0,
+                    obstacles=set(zA.obstacles),
+                    width=zA.width,
+                    height=zA.height,
+                    phase=phase_int,
+                    carrying_key=getattr(c_agent, "carrying_key", False),
+                    door_open=getattr(c_agent, "door_open", False),
+                    c_action=action,
+                    c_scored=scored,
+                    is_frontier=_is_frontier,
+                )
 
         # ---- 9. D out-of-band (if gD=1) ----
         d_activated = False
@@ -454,6 +584,7 @@ class MvpKernel:
             compression_stages=compression_stages,
             c_compressed=c_compressed,
             d_suppressed=d_suppressed,
+            replan_burst_active=burst_active,
         )
 
     @property
@@ -498,6 +629,28 @@ class MvpKernel:
         the analytical direction_prior from UnifiedMemory L1 layer.
         """
         self._direction_prior_net = net
+
+    def set_replan_burst_params(
+        self,
+        stuck_window: int = 5,
+        burst_length: int = 5,
+        no_progress_threshold: int = 12,
+    ) -> None:
+        """Configure replan-burst parameters.
+
+        Args:
+            stuck_window: Number of (pos, dir) states to check for looping.
+            burst_length: Number of ticks to force C when stuck.
+            no_progress_threshold: Ticks without discovering new cells -> stuck.
+        """
+        self._replan_stuck_window = stuck_window
+        self._replan_burst_length = burst_length
+        self._replan_no_progress_threshold = no_progress_threshold
+
+    @property
+    def replan_burst_count(self) -> int:
+        """Number of replan-burst activations this episode."""
+        return self._replan_burst_count
 
     def _compressed_l2_action(
         self, zA,
@@ -556,17 +709,24 @@ class MvpKernel:
             next_dir = zA_next.direction if zA_next.direction is not None else 0
 
             if action in ("turn_left", "turn_right", "forward"):
-                if direction_prior:
-                    # Analytical scoring (BFS-based, uses compressed target)
+                if (self._online_distiller is not None
+                        and self._online_distiller.is_enabled
+                        and target is not None):
+                    # Priority 1: Online direction net (learned from C)
+                    score = self._online_net_l2_score(
+                        zA, zA_next, action, direction, next_dir,
+                        tuple(target))
+                elif direction_prior:
+                    # Priority 2: Analytical scoring (BFS-based)
                     score = self._analytical_l2_score(
                         zA, zA_next, action, direction, next_dir,
                         direction_prior, obstacle_set)
                 elif self._direction_prior_net is not None:
-                    # Neural fallback (no target available)
+                    # Priority 3: Legacy neural fallback (no target)
                     score = self._neural_l2_score(
                         zA, zA_next, action, next_dir)
                 else:
-                    # No prior available: basic move preference
+                    # Priority 4: Basic move preference
                     if action == "forward":
                         if zA_next.agent_pos != zA.agent_pos:
                             score = 0.3
@@ -700,6 +860,59 @@ class MvpKernel:
             raw = self._direction_prior_net(features.unsqueeze(0))
             return raw.item()  # Direct regression output (MSE on C's score)
 
+    def _online_net_l2_score(
+        self, zA, zA_next, action: str, direction: int, next_dir: int,
+        target: Tuple[int, int],
+    ) -> float:
+        """Score a navigation action using the online direction net.
+
+        Uses the net's predicted direction + confidence to score actions.
+        Actions aligned with the predicted direction score higher.
+        Low-confidence predictions return low scores (replan-burst handles it).
+        """
+        from agents.doorkey_agent_c import DIR_VEC
+
+        c_agent = self.agent_c
+        phase_int = {"FIND_KEY": 0, "OPEN_DOOR": 1, "REACH_GOAL": 2}.get(
+            getattr(c_agent, "phase", "FIND_KEY"), 0)
+
+        predicted_dir, confidence = self._online_distiller.predict(
+            agent_pos=zA.agent_pos,
+            target=target,
+            agent_dir=direction,
+            obstacles=set(zA.obstacles),
+            width=zA.width,
+            height=zA.height,
+            phase=phase_int,
+            carrying_key=getattr(c_agent, "carrying_key", False),
+            door_open=getattr(c_agent, "door_open", False),
+        )
+
+        # Low confidence -> return modest score; replan-burst will handle
+        if confidence < self._online_distiller.confidence_threshold:
+            if action == "forward":
+                return 0.1 if zA_next.agent_pos != zA.agent_pos else -0.1
+            return 0.05
+
+        if action == "forward":
+            # Wall hit check
+            if zA_next.agent_pos == zA.agent_pos:
+                return -0.1
+            # Is the agent facing the predicted direction?
+            if direction == predicted_dir:
+                return 1.0 * confidence
+            return 0.2  # Moving but not in predicted direction
+
+        else:
+            # turn_left / turn_right: how close to predicted direction?
+            diff = abs(next_dir - predicted_dir) % 4
+            turns_remaining = min(diff, 4 - diff)
+            if turns_remaining == 0:
+                return 0.9 * confidence  # Aligned after this turn
+            elif turns_remaining == 1:
+                return 0.5 * confidence
+            return 0.1
+
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
@@ -782,6 +995,78 @@ class MvpKernel:
             return False
         window = list(self._last_positions)[-self.stuck_window:]
         return len(set(window)) == 1
+
+    def _update_exploration_progress(self) -> None:
+        """Track whether B is discovering new cells via ObjectMemory.
+
+        Increments a no-progress counter if the known cell count hasn't
+        increased since last tick. Resets counter when new cells are found.
+        """
+        om = getattr(self.agent_c, "_object_memory", None)
+        if om is None:
+            return
+        current_known = len(om.known_empty) + len(om.known_walls)
+        if current_known > self._replan_known_cells_count:
+            # Progress: new cells discovered
+            self._replan_known_cells_count = current_known
+            self._replan_no_progress_ticks = 0
+        else:
+            self._replan_no_progress_ticks += 1
+
+    def _is_b_stuck(self) -> bool:
+        """Check if B (compressed mode) is stuck.
+
+        Three conditions (any triggers burst):
+        1. Position/direction loop: last K (pos,dir) states have ≤2 unique
+        2. All same position (turns only, no movement)
+        3. Exploration stagnation: no new cells discovered for N ticks
+        """
+        w = self._replan_stuck_window
+        if len(self._replan_states) < w:
+            return False
+
+        # Condition 1: (pos, dir) loop
+        window = list(self._replan_states)[-w:]
+        if len(set(window)) <= 2:
+            return True
+
+        # Condition 2: all positions same (turns only)
+        positions = [s[0] for s in window]
+        if len(set(positions)) == 1:
+            return True
+
+        # Condition 3: exploration stagnation (no new cells for N ticks)
+        if self._replan_no_progress_ticks >= self._replan_no_progress_threshold:
+            return True
+
+        return False
+
+    def _nearest_frontier_target(self, zA) -> Optional[Tuple[int, int]]:
+        """Find nearest frontier cell from ObjectMemory as pseudo-target.
+
+        Used for distiller sample collection during exploration phases
+        when no explicit target (key/door/goal) is known. The frontier
+        represents C's exploration objective, so it's a valid proxy for
+        "where C is trying to go."
+
+        Returns None if no ObjectMemory or no frontier cells exist.
+        """
+        om = getattr(self.agent_c, "_object_memory", None)
+        if om is None:
+            return None
+        frontier = om.frontier
+        if not frontier:
+            return None
+        # Pick nearest frontier cell by Manhattan distance
+        best = None
+        best_dist = float("inf")
+        ax, ay = zA.agent_pos
+        for fx, fy in frontier:
+            d = abs(fx - ax) + abs(fy - ay)
+            if d < best_dist:
+                best_dist = d
+                best = (fx, fy)
+        return best
 
     def _should_deconstruct(
         self, t: int, gD: int, signals: MvpTickSignals,

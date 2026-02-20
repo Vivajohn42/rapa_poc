@@ -164,3 +164,4 @@ class MvpTickResult:
     compression_stages: List[str] = field(default_factory=list)  # e.g. ["L3_L2", "L2_L1"]
     c_compressed: bool = False     # C ran in compressed mode (L2 compressed)
     d_suppressed: bool = False     # D skipped due to L3 compression
+    replan_burst_active: bool = False  # This tick was a replan-burst tick (C forced)

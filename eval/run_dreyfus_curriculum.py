@@ -49,6 +49,7 @@ from agents.event_pattern_d import EventPatternD, DoorKeyEventType
 from agents.object_memory import ObjectMemory
 from kernel.kernel import MvpKernel
 from router.deconstruct_doorkey import deconstruct_doorkey_d_to_c
+from agents.online_distiller import OnlineDistiller
 
 FALLBACK_ACTIONS = ["turn_left", "turn_right", "forward", "pickup", "toggle"]
 
@@ -86,6 +87,12 @@ class EpisodeMetrics:
     d_has_sequence: bool = False
     pct_4fom: float = 0.0
     pct_c_compressed: float = 0.0  # fraction of ticks where B took over from C
+    replan_burst_count: int = 0    # replan-burst activations this episode
+    distiller_samples: int = 0     # total teacher samples in distiller
+    distiller_accuracy: float = 0.0  # distiller eval accuracy
+    distiller_acc_targeted: float = 0.0  # accuracy on targeted samples only
+    distiller_mean_conf: float = 0.0  # mean prediction confidence
+    distiller_enabled: bool = False  # whether distiller net was active
 
 
 @dataclass
@@ -238,6 +245,12 @@ def run_episode(
     # Episode end
     success = done and reward > 0
     event_d.end_episode(success=success, steps=step_count)
+
+    # Online distiller episode lifecycle
+    distiller = getattr(kernel, '_online_distiller', None)
+    if distiller is not None:
+        distiller.end_episode(success=success)
+
     env.close()
 
     total_ticks = sum(regime_counter.values()) or 1
@@ -261,6 +274,12 @@ def run_episode(
         d_has_sequence=event_d.success_sequence is not None,
         pct_4fom=round(pct_4fom, 3),
         pct_c_compressed=round(pct_c_comp, 3),
+        replan_burst_count=kernel.replan_burst_count,
+        distiller_samples=distiller.total_samples if distiller is not None else 0,
+        distiller_accuracy=round(distiller.accuracy, 3) if distiller is not None else 0.0,
+        distiller_acc_targeted=round(distiller.accuracy_targeted, 3) if distiller is not None else 0.0,
+        distiller_mean_conf=round(distiller.mean_confidence, 3) if distiller is not None else 0.0,
+        distiller_enabled=distiller.is_enabled if distiller is not None else False,
     )
 
 
@@ -311,10 +330,17 @@ def run_stage(
             sr = _recent_sr(result.episodes, min(len(result.episodes), window))
             status = "OK" if metrics.success else "FAIL"
             comp = ",".join(metrics.compression_events) if metrics.compression_events else "-"
+            dist_info = ""
+            if metrics.distiller_enabled:
+                dist_info = (f"  net=ON(t={metrics.distiller_acc_targeted:.0%}"
+                             f",c={metrics.distiller_mean_conf:.0%})")
+            elif metrics.distiller_samples > 0:
+                dist_info = f"  net=OFF(s={metrics.distiller_samples})"
+            burst_info = f"  burst={metrics.replan_burst_count}" if metrics.replan_burst_count > 0 else ""
             print(f"  ep {ep:3d}: {status:4s}  steps={metrics.steps:3d}  "
-                  f"SR={sr:.0%}  4FoM={metrics.pct_4fom:.0%}  "
-                  f"B={metrics.pct_c_compressed:.0%}  comp=[{comp}]  "
-                  f"d8={metrics.mean_delta_8:.3f}")
+                  f"SR={sr:.0%}  B={metrics.pct_c_compressed:.0%}  "
+                  f"comp=[{comp}]  d8={metrics.mean_delta_8:.3f}"
+                  f"{burst_info}{dist_info}")
 
         # Stagnation check for D reflection
         if ((ep + 1) % stagnation_window == 0
@@ -428,7 +454,16 @@ def run_grid_size(
     stage_results.append(s1)
     ep_offset += len(s1.episodes)
 
-    # ---- Stage 2: Proficient (UM + compression active) ----
+    # ---- Stage 2: Proficient (UM + compression + online distiller) ----
+    distiller = OnlineDistiller(
+        replay_max=2000,
+        train_interval=3,
+        min_samples=200,
+        min_accuracy_targeted=0.55,
+        min_mean_confidence=0.45,
+        confidence_threshold=0.55,
+    )
+
     kernel_s2 = MvpKernel(
         agent_a=DoorKeyAgentA(),
         agent_b=DoorKeyAgentB(),
@@ -440,7 +475,19 @@ def run_grid_size(
         fallback_actions=FALLBACK_ACTIONS,
         use_unified_memory=True,
         active_compression=True,
+        online_distiller=distiller,
     )
+
+    # Size-adaptive replan-burst parameters
+    if size >= 16:
+        kernel_s2.set_replan_burst_params(
+            stuck_window=5, burst_length=8, no_progress_threshold=12)
+    elif size >= 8:
+        kernel_s2.set_replan_burst_params(
+            stuck_window=5, burst_length=5, no_progress_threshold=20)
+    else:
+        kernel_s2.set_replan_burst_params(
+            stuck_window=5, burst_length=3, no_progress_threshold=30)
 
     s2 = run_stage(
         stage=2, size=size, event_d=event_d, kernel=kernel_s2,
@@ -588,6 +635,9 @@ def save_csv(
         "success", "steps", "reward",
         "pct_4fom", "pct_c_compressed", "mean_delta_8", "mean_loop_gain",
         "compression_events", "d_has_sequence",
+        "replan_burst_count", "distiller_samples",
+        "distiller_accuracy", "distiller_acc_targeted",
+        "distiller_mean_conf", "distiller_enabled",
     ]
 
     rows = []
@@ -608,6 +658,12 @@ def save_csv(
                     "mean_loop_gain": ep.mean_loop_gain,
                     "compression_events": ",".join(ep.compression_events),
                     "d_has_sequence": ep.d_has_sequence,
+                    "replan_burst_count": ep.replan_burst_count,
+                    "distiller_samples": ep.distiller_samples,
+                    "distiller_accuracy": ep.distiller_accuracy,
+                    "distiller_acc_targeted": ep.distiller_acc_targeted,
+                    "distiller_mean_conf": ep.distiller_mean_conf,
+                    "distiller_enabled": ep.distiller_enabled,
                 })
 
     with open(path, "w", newline="") as f:
