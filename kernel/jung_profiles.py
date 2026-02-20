@@ -11,10 +11,17 @@ Each weight is in [0.0, 1.0]:
   ie_weight  Introversion / Extraversion  (high = I, low = E)
   sn_weight  Sensing / Intuition          (high = N, low = S)
   tf_weight  Thinking / Feeling           (high = F, low = T)
+
+V3 (Function Stack):
+  Replaces the 3-axis model with a 4-function cognitive stack per profile.
+  Each of the 8 Jungian functions (Ni, Ne, Ti, Te, Si, Se, Fi, Fe) has a
+  specific effect vector on RAPA parameters. The effective value for each
+  parameter is BASE + sum(function_effect × position_weight).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Dict, Tuple
 
 
 @dataclass
@@ -227,5 +234,224 @@ PROFILES_V2: dict[str, JungProfile] = {
     "DEFAULT_V2": JungProfile(
         "Default v2 (balanced)",
         ie_weight=0.5, sn_weight=0.5, tf_weight=0.5,
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
+# V3: Jungian Function Stack — 4-function cognitive stack per profile
+# ---------------------------------------------------------------------------
+
+# Each cognitive function's effect on RAPA parameters.
+# Effective value = BASE + sum(effect × position_weight) across the stack.
+FUNCTION_EFFECTS: Dict[str, Dict[str, float]] = {
+    "Ni": {"compression_window": +4,  "threshold_l3": -0.08},
+    "Ne": {"max_invalidations": +2,   "d_cooldown_steps": -2},
+    "Ti": {"threshold_l2": -0.05,     "deconstruct_cooldown": +1},
+    "Te": {"compression_window": -3,  "threshold_l3": -0.06, "threshold_l2": -0.05},
+    "Si": {"cascade_depth": -0.5,     "stuck_window": +1},
+    "Se": {"d_cooldown_steps": -3,    "compression_window": -2},
+    "Fi": {"threshold_l2": +0.06,     "tie_break_delta": +0.05},
+    "Fe": {"tie_break_delta": +0.08},
+}
+
+BASE_PARAMS: Dict[str, float] = {
+    "compression_window": 5,
+    "threshold_l3": 0.20,
+    "threshold_l2": 0.15,
+    "threshold_l1": 0.25,
+    "cascade_depth": 2,
+    "max_invalidations": 3,
+    "d_cooldown_steps": 8,
+    "stuck_window": 6,
+    "tie_break_delta": 0.25,
+    "deconstruct_cooldown": 3,
+}
+
+# Introversion/Extraversion classification for ie_weight computation
+_IE_SIGN: Dict[str, int] = {
+    "Ni": 1, "Ti": 1, "Si": 1, "Fi": 1,
+    "Ne": -1, "Te": -1, "Se": -1, "Fe": -1,
+}
+# Intuition/Sensing classification for sn_weight computation
+_SN_SIGN: Dict[str, int] = {
+    "Ni": 1, "Ne": 1,
+    "Si": -1, "Se": -1,
+    "Ti": 0, "Te": 0, "Fi": 0, "Fe": 0,
+}
+
+
+@dataclass
+class JungProfileV3:
+    """A personality profile based on a 4-function cognitive stack.
+
+    Each function (Ni, Ne, Ti, Te, Si, Se, Fi, Fe) has specific effects on
+    RAPA parameters.  Position in the stack determines influence weight:
+    dominant=1.0, auxiliary=0.7, tertiary=0.4, inferior=0.2.
+
+    Exposes the same property API as JungProfile (V1/V2) for backward
+    compatibility with kernel.py, compression.py, and closure_residuum.py.
+    """
+
+    name: str
+    stack: Tuple[str, str, str, str]  # e.g. ("Ni", "Te", "Fi", "Se")
+    weights: Tuple[float, ...] = (1.0, 0.7, 0.4, 0.2)
+
+    def __post_init__(self):
+        if len(self.stack) != 4:
+            raise ValueError(f"Stack must have 4 functions, got {len(self.stack)}")
+        valid = set(FUNCTION_EFFECTS.keys())
+        for fn in self.stack:
+            if fn not in valid:
+                raise ValueError(f"Unknown function: {fn!r}, expected one of {valid}")
+        if len(self.weights) != len(self.stack):
+            raise ValueError(f"weights length {len(self.weights)} != stack length {len(self.stack)}")
+
+    def _compute(self, param: str) -> float:
+        """Compute effective parameter value from stack effects."""
+        base = BASE_PARAMS.get(param, 0.0)
+        total = base
+        for fn, w in zip(self.stack, self.weights):
+            effect = FUNCTION_EFFECTS.get(fn, {}).get(param, 0.0)
+            total += effect * w
+        return total
+
+    # --- Effective ie/sn weights for ClosureResiduum ---
+
+    @property
+    def ie_weight(self) -> float:
+        """Effective introversion weight from stack.
+
+        I-functions contribute +1, E-functions contribute -1.
+        Normalised to [0, 1] where 1.0 = maximally introverted.
+        """
+        raw = sum(_IE_SIGN[fn] * w for fn, w in zip(self.stack, self.weights))
+        return max(0.0, min(1.0, 0.5 + raw / 4.6))
+
+    @property
+    def sn_weight(self) -> float:
+        """Effective intuition weight from stack.
+
+        N-functions contribute +1, S-functions contribute -1, T/F = 0.
+        Normalised to [0, 1] where 1.0 = maximally intuitive.
+        """
+        raw = sum(_SN_SIGN[fn] * w for fn, w in zip(self.stack, self.weights))
+        return max(0.0, min(1.0, 0.5 + raw / 4.6))
+
+    # --- Compression parameters (same API as V2) ---
+
+    @property
+    def compression_threshold_l3(self) -> float:
+        """L3->L2 compression threshold (d_term)."""
+        return max(0.01, self._compute("threshold_l3"))
+
+    @property
+    def compression_threshold_l2(self) -> float:
+        """L2->L1 compression threshold (c_term)."""
+        return max(0.01, self._compute("threshold_l2"))
+
+    @property
+    def compression_threshold_l1(self) -> float:
+        """L1->L0 compression threshold (delta_4)."""
+        return max(0.01, self._compute("threshold_l1"))
+
+    @property
+    def compression_window(self) -> int:
+        """Compression cooldown window (ticks)."""
+        return max(2, round(self._compute("compression_window")))
+
+    @property
+    def cascade_depth(self) -> int:
+        """Max compression stages per tick."""
+        return max(1, round(self._compute("cascade_depth")))
+
+    @property
+    def max_invalidations(self) -> int:
+        """Max cache invalidations per episode."""
+        return max(1, round(self._compute("max_invalidations")))
+
+    # --- Kernel/stream parameters (same API as V2) ---
+
+    @property
+    def deconstruct_cooldown(self) -> int:
+        """D->C deconstruction cooldown ticks."""
+        return max(1, round(self._compute("deconstruct_cooldown")))
+
+    @property
+    def d_cooldown_steps(self) -> int:
+        """D activation cooldown steps."""
+        return max(3, round(self._compute("d_cooldown_steps")))
+
+    @property
+    def stuck_window(self) -> int:
+        """Stuck detection window."""
+        return max(3, round(self._compute("stuck_window")))
+
+    @property
+    def no_progress_window(self) -> int:
+        """No-progress detection window (alias for stuck_window)."""
+        return self.stuck_window
+
+    @property
+    def tie_break_delta(self) -> float:
+        """Tie-break delta for C's action selection."""
+        return max(0.05, self._compute("tie_break_delta"))
+
+    @property
+    def coupling_weight_c(self) -> float:
+        """BC coupling weight (derived from stack balance).
+
+        Fi/Fe dominant → higher C influence, Ti/Te dominant → lower.
+        """
+        # F-functions increase coupling, T-functions decrease
+        tf_sign = {"Fi": 1, "Fe": 1, "Ti": -1, "Te": -1,
+                   "Ni": 0, "Ne": 0, "Si": 0, "Se": 0}
+        raw = sum(tf_sign[fn] * w for fn, w in zip(self.stack, self.weights))
+        return max(0.3, min(0.7, 0.5 + raw / 4.6 * 0.4))
+
+    @property
+    def detour_tolerance(self) -> int:
+        """Waypoint detour tolerance for Stream D (derived from sn_weight)."""
+        return max(1, round(1 + self.sn_weight * 3))
+
+
+# ---------------------------------------------------------------------------
+# Pre-defined V3 profiles — 4-function cognitive stacks
+# ---------------------------------------------------------------------------
+
+PROFILES_V3: Dict[str, JungProfileV3] = {
+    "INTJ": JungProfileV3(
+        "Architect (INTJ)",
+        stack=("Ni", "Te", "Fi", "Se"),
+        # Ni-dominant: long compression window, low thresholds
+        # Te-auxiliary: efficient compression when ready
+        # → Rare but deep compression
+    ),
+    "ENFP": JungProfileV3(
+        "Champion (ENFP)",
+        stack=("Ne", "Fi", "Te", "Si"),
+        # Ne-dominant: high invalidations, quick cooldown
+        # Fi-auxiliary: cautious thresholds
+        # → Volatile, net less compression than INTJ
+    ),
+    "ISTJ": JungProfileV3(
+        "Inspector (ISTJ)",
+        stack=("Si", "Te", "Fi", "Ne"),
+        # Si-dominant: shallow cascade, stable patterns
+        # Te-auxiliary: short compression window
+        # → Frequent, shallow compression
+    ),
+    "ESFP": JungProfileV3(
+        "Performer (ESFP)",
+        stack=("Se", "Fi", "Te", "Ni"),
+        # Se-dominant: immediate reaction, short window
+        # Fi-auxiliary: cautious thresholds
+        # → Quick but guarded
+    ),
+    "DEFAULT_V3": JungProfileV3(
+        "Default v3 (balanced)",
+        stack=("Ni", "Te", "Fi", "Se"),
+        weights=(0.5, 0.5, 0.5, 0.5),
+        # Flat weights → all effects reduced → near BASE_PARAMS
     ),
 }

@@ -1,11 +1,14 @@
-"""Train DoorKeyActionValueNet on BFS-labelled data.
+"""Train DirectionPriorNet on C-behavior data (L2→L1 distillation).
 
-Same training loop as train_c.py: MSE loss, 90/10 train/val split,
+Same training loop pattern as train_doorkey_c.py: MSE loss, 90/10 split,
 Adam optimizer, sign accuracy tracking.
 
+The DirectionPriorNet learns to predict C's navigation scores using only
+L1-level features (no target, no phase), enabling compressed-L2 operation.
+
 Usage:
-    python -m train.train_doorkey_c --data train/data/expert_doorkey.json --epochs 100
-    python -m train.train_doorkey_c --epochs 50 --lr 0.0005  # custom
+    python -m train.train_doorkey_b --data train/data/c_behavior_doorkey.json --epochs 100
+    python -m train.train_doorkey_b --data train/data/c_behavior_doorkey.pt --epochs 100
 """
 from __future__ import annotations
 
@@ -20,40 +23,32 @@ from torch.utils.data import DataLoader, TensorDataset
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from models.doorkey_action_value_net import (
-    DoorKeyActionValueNet,
-    extract_doorkey_features,
+from models.direction_prior_net import (
+    DirectionPriorNet,
+    extract_l1_features,
 )
 
 
 def _process_sample(sample: dict):
-    """Extract features and label from a single sample dict."""
-    feat = extract_doorkey_features(
+    """Extract L1 features and C-score label from a single sample dict."""
+    feat = extract_l1_features(
         agent_pos=tuple(sample["agent_pos"]),
         agent_dir=sample["agent_dir"],
         next_pos=tuple(sample["next_pos"]),
         next_dir=sample["next_dir"],
-        target_pos=tuple(sample["target_pos"]),
         obstacles=[tuple(o) for o in sample["obstacles"]],
         width=sample["width"],
         height=sample["height"],
-        phase=sample["phase"],
         carrying_key=sample["carrying_key"],
     )
-    return feat, sample["bfs_label"]
+    return feat, sample["c_score"]
 
 
 def prepare_data(data_path: str, max_samples: int = 0):
-    """Load samples and prepare feature tensors + labels.
-
-    Supports two formats:
-    - .pt files: pre-extracted features (fast, recommended for large datasets)
-    - .json files: raw samples requiring feature extraction
-    """
+    """Load samples and prepare feature tensors + labels."""
     print(f"Loading data from {data_path}...")
 
     if data_path.endswith(".pt"):
-        # Fast path: pre-extracted features
         saved = torch.load(data_path, weights_only=True)
         X, y = saved["X"], saved["y"]
         if max_samples > 0 and len(X) > max_samples:
@@ -61,7 +56,6 @@ def prepare_data(data_path: str, max_samples: int = 0):
             X, y = X[perm], y[perm]
         print(f"  {len(X)} samples loaded from .pt file")
     else:
-        # JSON path: extract features on the fly
         with open(data_path) as f:
             data = json.load(f)
 
@@ -70,7 +64,7 @@ def prepare_data(data_path: str, max_samples: int = 0):
             rng = random.Random(42)
             data = rng.sample(data, max_samples)
 
-        print(f"  {len(data)} raw samples, extracting features...")
+        print(f"  {len(data)} raw samples, extracting L1 features...")
         features_list = []
         labels_list = []
         for i, sample in enumerate(data):
@@ -92,16 +86,15 @@ def prepare_data(data_path: str, max_samples: int = 0):
 
 
 def train(
-    data_path: str = "train/data/expert_doorkey.json",
+    data_path: str = "train/data/c_behavior_doorkey.json",
     epochs: int = 100,
     batch_size: int = 128,
     lr: float = 1e-3,
     hidden: int = 64,
-    checkpoint_path: str = "train/checkpoints/doorkey_action_value_net.pt",
+    checkpoint_path: str = "train/checkpoints/direction_prior_net.pt",
     max_samples: int = 0,
-    seed: int = 42,
 ):
-    """Train DoorKeyActionValueNet on BFS labels."""
+    """Train DirectionPriorNet on C-behavior labels."""
     X, y = prepare_data(data_path, max_samples=max_samples)
 
     # 90/10 train/val split
@@ -109,10 +102,7 @@ def train(
     n_val = max(n // 10, 1)
     n_train = n - n_val
 
-    # Seed controls data split only — not weight init or training
-    g = torch.Generator()
-    g.manual_seed(seed)
-    perm = torch.randperm(n, generator=g)
+    perm = torch.randperm(n)
     X, y = X[perm], y[perm]
 
     X_train, y_train = X[:n_train], y[:n_train]
@@ -125,15 +115,16 @@ def train(
     train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
     val_dl = DataLoader(val_ds, batch_size=batch_size)
 
-    net = DoorKeyActionValueNet(hidden=hidden)
+    net = DirectionPriorNet(hidden=hidden)
     optimizer = torch.optim.Adam(net.parameters(), lr=lr)
     loss_fn = nn.MSELoss()
 
     n_params = sum(p.numel() for p in net.parameters())
-    print(f"DoorKeyActionValueNet params: {n_params:,}")
+    print(f"DirectionPriorNet params: {n_params:,}")
     print(f"Training for {epochs} epochs...\n")
 
     best_val_loss = float("inf")
+    best_sign_acc = 0.0
     checkpoint_dir = Path(checkpoint_path).parent
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
@@ -175,6 +166,7 @@ def train(
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
+            best_sign_acc = sign_acc
             torch.save(net.state_dict(), checkpoint_path)
             marker = " *"
         else:
@@ -187,27 +179,26 @@ def train(
                   f"sign_acc={sign_acc:.3f}{marker}")
 
     print(f"\nBest val loss: {best_val_loss:.6f}")
+    print(f"Best sign accuracy: {best_sign_acc:.3f}")
     print(f"Checkpoint saved to: {checkpoint_path}")
-    print(f"DoorKeyActionValueNet params: {n_params:,}")
+    print(f"DirectionPriorNet params: {n_params:,}")
 
     return net
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Train DoorKeyActionValueNet")
+        description="Train DirectionPriorNet (L2->L1 distillation)")
     parser.add_argument("--data", type=str,
-                        default="train/data/expert_doorkey.json")
+                        default="train/data/c_behavior_doorkey.json")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--hidden", type=int, default=64)
     parser.add_argument("--checkpoint", type=str,
-                        default="train/checkpoints/doorkey_action_value_net.pt")
+                        default="train/checkpoints/direction_prior_net.pt")
     parser.add_argument("--max-samples", type=int, default=0,
-                        help="Max samples to use (0=all, useful for large datasets)")
-    parser.add_argument("--seed", type=int, default=42,
-                        help="Random seed for train/val split reproducibility")
+                        help="Max samples to use (0=all)")
     args = parser.parse_args()
 
     train(
@@ -218,7 +209,6 @@ def main():
         hidden=args.hidden,
         checkpoint_path=args.checkpoint,
         max_samples=args.max_samples,
-        seed=args.seed,
     )
 
 

@@ -63,7 +63,11 @@ class CompressionController:
             self._cooldown = cooldown
             self._max_cascade = max_cascade_depth
 
-        self._max_invalidations = max_invalidations_per_episode
+        # V3 profiles expose max_invalidations; V2 profiles don't
+        if jung_profile is not None and hasattr(jung_profile, 'max_invalidations'):
+            self._max_invalidations = jung_profile.max_invalidations
+        else:
+            self._max_invalidations = max_invalidations_per_episode
         self._last_compress: Dict[str, int] = {
             "L3_L2": -999, "L2_L1": -999, "L1_L0": -999,
         }

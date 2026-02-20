@@ -1,7 +1,7 @@
 """Jungian Weights x Unified Memory Evaluation — DoorKey.
 
 Tests the complete RAPA v2 Unified Memory + Cascaded Compression pipeline
-across 5 Jungian profiles (INTJ/ESFP/ISTJ/ENFP/DEFAULT_V2).
+across 5 Jungian V3 profiles (function-stack based).
 
 Assertions:
   1. Backward compatibility: DoorKey with use_unified_memory=False SR >= 90%
@@ -9,7 +9,7 @@ Assertions:
   3. Compression works: L3->L2 fires in at least some successful episodes
   4. Cascade depth: L2->L1 fires in at least some episodes
   5. Profile behavioral difference: 5 profiles produce different compression counts
-  6. ENFP compresses more often than ISTJ (E+N vs I+S)
+  6. Profiles produce diverse compression behavior (at least 2 distinct values)
   7. Cache invalidation: spikes reactivate layers (measured via UM invalidation_count)
   8. All profiles >= 90% SR on DoorKey-6x6
 
@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from env.doorkey_adapter import DoorKeyAdapter
 from kernel.kernel import MvpKernel
-from kernel.jung_profiles import JungProfile, PROFILES_V2
+from kernel.jung_profiles import JungProfileV3, PROFILES_V3
 
 
 @dataclass
@@ -73,7 +73,7 @@ def run_dk_um_episode(
     decon_fn = adapter.get_deconstruct_fn()
     goal_map = adapter.get_goal_map()
 
-    profile = PROFILES_V2.get(profile_name)
+    profile = PROFILES_V3.get(profile_name)
 
     kernel = MvpKernel(
         agent_a=A, agent_b=B, agent_c=C, agent_d=D,
@@ -162,7 +162,7 @@ def main():
 
     n = args.n
     size = args.size
-    profile_names = list(PROFILES_V2.keys())
+    profile_names = list(PROFILES_V3.keys())
 
     print("=" * 78)
     print("  Jungian Weights x Unified Memory — DoorKey Evaluation")
@@ -174,7 +174,7 @@ def main():
     print("\n--- Test 1: Backward Compatibility (UM=False) ---")
     legacy_results = []
     for i in range(n):
-        r = run_dk_um_episode("DEFAULT_V2", seed=42 + i,
+        r = run_dk_um_episode("DEFAULT_V3", seed=42 + i,
                               use_unified_memory=False, size=size)
         legacy_results.append(r)
     sr_legacy = sum(1 for r in legacy_results if r.success) / n
@@ -189,7 +189,7 @@ def main():
     print("\n--- Test 2: UM Parity (UM=True, DEFAULT_V2) ---")
     um_default_results = []
     for i in range(n):
-        r = run_dk_um_episode("DEFAULT_V2", seed=42 + i,
+        r = run_dk_um_episode("DEFAULT_V3", seed=42 + i,
                               use_unified_memory=True, size=size)
         um_default_results.append(r)
     sr_um = sum(1 for r in um_default_results if r.success) / n
@@ -205,7 +205,7 @@ def main():
     all_results: Dict[str, List[UMEpisodeResult]] = {}
 
     for name in profile_names:
-        if name == "DEFAULT_V2":
+        if name == "DEFAULT_V3":
             # Already ran above
             all_results[name] = um_default_results
             continue
@@ -245,7 +245,7 @@ def main():
           f"{'CW':>4s} {'CD':>4s}")
     print(f"  {'-'*12} {'-'*6} {'-'*6} {'-'*6} {'-'*4} {'-'*4}")
     for name in profile_names:
-        p = PROFILES_V2[name]
+        p = PROFILES_V3[name]
         print(f"  {name:<12s} {p.compression_threshold_l3:6.3f} "
               f"{p.compression_threshold_l2:6.3f} "
               f"{p.compression_threshold_l1:6.3f} "
@@ -286,14 +286,12 @@ def main():
     for name in profile_names:
         print(f"     {name}: {comp_per_profile[name]:.2f} avg compressions/episode")
 
-    # Test 6: ENFP compresses more often than ISTJ
-    # ENFP: Extravert (short cooldown) + high N (deep cascade) → frequent compression
-    # ISTJ: Introvert (long cooldown) + low N (shallow cascade) → fewer compressions
-    enfp_comp = _mean([r.total_compressions for r in all_results["ENFP"]])
-    istj_comp = _mean([r.total_compressions for r in all_results["ISTJ"]])
-    p6 = enfp_comp >= istj_comp
-    print(f"\n  6. [{'PASS' if p6 else 'FAIL'}] ENFP >= ISTJ compressions: "
-          f"ENFP={enfp_comp:.2f} vs ISTJ={istj_comp:.2f}")
+    # Test 6: Profiles produce diverse compression behavior
+    # V3 function stacks should produce meaningfully different compression counts
+    comp_values = sorted(set(round(v, 2) for v in comp_per_profile.values()))
+    p6 = len(comp_values) >= 2
+    print(f"\n  6. [{'PASS' if p6 else 'FAIL'}] Compression diversity: "
+          f"{len(comp_values)} distinct values: {comp_values}")
 
     # Test 7: Cache invalidation (surprise triggers)
     total_inval = sum(r.invalidation_count for r in all_flat)

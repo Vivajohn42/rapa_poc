@@ -80,6 +80,7 @@ class MvpKernel:
         deconstruct_fn=None,
         fallback_actions: Optional[List[str]] = None,
         use_unified_memory: bool = False,
+        active_compression: bool = False,
     ):
         self.agent_a = agent_a
         self.agent_b = agent_b
@@ -89,6 +90,12 @@ class MvpKernel:
         self.enable_governance = enable_governance
         self.jung_profile = jung_profile
         self._fallback_actions = fallback_actions
+        self._active_compression = active_compression
+        self._direction_prior_net = None  # Set via set_direction_prior_net()
+
+        # active_compression implies use_unified_memory
+        if active_compression:
+            use_unified_memory = True
 
         # Apply Jung profile overrides (if provided)
         if jung_profile is not None:
@@ -273,12 +280,31 @@ class MvpKernel:
         # ---- 8. Execute agents in schedule order ----
         action = None
         scored = None
+        c_compressed = False
 
         # Update C's target from memory
         if "target" in zC.memory:
             self.agent_c.goal.target = tuple(zC.memory["target"])
 
-        if gC == 1:
+        # Active Mode: check if L2 is compressed → C runs in compressed mode
+        # C only runs compressed if a target is known (direction_prior needs it)
+        l2_compressed = (
+            self._active_compression
+            and self._unified_memory is not None
+            and self._unified_memory.is_compressed("L2")
+            and "target" in zC.memory
+            and zC.memory.get("target") is not None
+        )
+
+        if l2_compressed:
+            # C compressed: use direction prior from L1 instead of full C
+            action, scored = self._compressed_l2_action(zA)
+            c_compressed = True
+            if len(scored) >= 2:
+                self._last_decision_delta = scored[0][1] - scored[1][1]
+            else:
+                self._last_decision_delta = 0.0
+        elif gC == 1:
             # C active: use C's goal-directed action selection
             action, scored = self.agent_c.choose_action(
                 zA,
@@ -297,8 +323,28 @@ class MvpKernel:
 
         # ---- 9. D out-of-band (if gD=1) ----
         d_activated = False
+        d_suppressed = False
         zD = None
-        if gD == 1 and self.agent_d is not None:
+
+        # Active Mode: check if L3 is compressed → skip D's build_micro
+        # BUT: D is still needed if no target exists (D-essentiality)
+        # or if invalidation just happened (surprise trigger)
+        l3_compressed = (
+            self._active_compression
+            and self._unified_memory is not None
+            and self._unified_memory.is_compressed("L3")
+        )
+        # D must remain active if target is unknown (D-essentiality)
+        target_known = "target" in zC.memory and zC.memory["target"] is not None
+        d_really_suppressed = l3_compressed and target_known
+
+        if d_really_suppressed and self.agent_d is not None:
+            # D suppressed: still observe for LoopGain but don't build
+            d_suppressed = True
+            self.agent_d.observe_step(
+                t=t, zA=zA, action=action, reward=0.0, done=done,
+            )
+        elif gD == 1 and self.agent_d is not None:
             d_activated = True
             self.agent_d.observe_step(
                 t=t, zA=zA, action=action, reward=0.0, done=done,
@@ -404,6 +450,8 @@ class MvpKernel:
             d_activated=d_activated,
             decon_fired=decon_fired,
             compression_stages=compression_stages,
+            c_compressed=c_compressed,
+            d_suppressed=d_suppressed,
         )
 
     @property
@@ -436,6 +484,219 @@ class MvpKernel:
     def compression(self) -> Optional[CompressionController]:
         """Compression controller (None if use_unified_memory=False)."""
         return self._compression
+
+    # ------------------------------------------------------------------
+    # Active Compression API
+    # ------------------------------------------------------------------
+
+    def set_direction_prior_net(self, net) -> None:
+        """Attach a trained DirectionPriorNet for neural compressed-L2 scoring.
+
+        When set, _compressed_l2_action uses the neural net instead of
+        the analytical direction_prior from UnifiedMemory L1 layer.
+        """
+        self._direction_prior_net = net
+
+    def _compressed_l2_action(
+        self, zA,
+    ) -> Tuple[str, List[Tuple[str, float]]]:
+        """Action selection when L2 is compressed (C bypassed).
+
+        Navigation: scores based on direction_prior from UM L1 layer,
+        or via DirectionPriorNet if available.
+        Interaction: deterministic D-essentiality rules preserved —
+        reads phase/key_pos/door_pos from agent_c (set by adapter).
+        """
+        from agents.doorkey_agent_c import ACTIONS, DIR_VEC
+
+        scored: List[Tuple[str, float]] = []
+        direction = zA.direction if zA.direction is not None else 0
+        obstacle_set = set(zA.obstacles)
+
+        # Compute live direction_prior from current position + compressed target
+        # (Static UM L1 prior is stale after agent moves — must recompute)
+        zC = self._zC
+        target = zC.memory.get("target") if zC else None
+        direction_prior: List[str] = []
+        if target is not None:
+            dx = target[0] - zA.agent_pos[0]
+            dy = target[1] - zA.agent_pos[1]
+            if dx > 0:
+                direction_prior.append("right")
+            elif dx < 0:
+                direction_prior.append("left")
+            if dy > 0:
+                direction_prior.append("down")
+            elif dy < 0:
+                direction_prior.append("up")
+
+        # Read interaction priors from UM L1 (these are state-based, not position-based)
+        l1_data = self._unified_memory.read_layer("L1") if self._unified_memory else {}
+        interaction_prior = l1_data.get("interaction_prior", {})
+
+        # Read phase-specific state from agent_c (set by adapter.inject_obs_metadata)
+        c = self.agent_c
+        phase = getattr(c, "phase", "FIND_KEY")
+        key_pos = getattr(c, "key_pos", None)
+        door_pos = getattr(c, "door_pos", None)
+        carrying_key = getattr(c, "carrying_key", False)
+
+        # Facing position
+        dx, dy = DIR_VEC[direction]
+        fx, fy = zA.agent_pos[0] + dx, zA.agent_pos[1] + dy
+        facing = None
+        if 0 <= fx < zA.width and 0 <= fy < zA.height:
+            facing = (fx, fy)
+
+        for action in ACTIONS:
+            score = 0.0
+            zA_next = self.agent_b.predict_next(zA, action)
+            next_dir = zA_next.direction if zA_next.direction is not None else 0
+
+            if action in ("turn_left", "turn_right", "forward"):
+                if direction_prior:
+                    # Analytical scoring (BFS-based, uses compressed target)
+                    score = self._analytical_l2_score(
+                        zA, zA_next, action, direction, next_dir,
+                        direction_prior, obstacle_set)
+                elif self._direction_prior_net is not None:
+                    # Neural fallback (no target available)
+                    score = self._neural_l2_score(
+                        zA, zA_next, action, next_dir)
+                else:
+                    # No prior available: basic move preference
+                    if action == "forward":
+                        if zA_next.agent_pos != zA.agent_pos:
+                            score = 0.3
+                        else:
+                            score = -0.1
+                    else:
+                        score = 0.05
+
+            elif action == "pickup":
+                # D-essentiality: deterministic rules
+                if (phase == "FIND_KEY"
+                        and not carrying_key
+                        and key_pos is not None
+                        and facing == key_pos):
+                    score = 3.0
+                else:
+                    score = -1.0
+
+            elif action == "toggle":
+                # D-essentiality: deterministic rules
+                if (phase == "OPEN_DOOR"
+                        and carrying_key
+                        and door_pos is not None
+                        and facing == door_pos):
+                    score = 3.0
+                else:
+                    score = -1.0
+
+            scored.append((action, score))
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored[0][0], scored
+
+    def _analytical_l2_score(
+        self, zA, zA_next, action: str, direction: int, next_dir: int,
+        direction_prior: List[str], obstacle_set: set,
+    ) -> float:
+        """Score a navigation action using BFS-based distance to compressed target.
+
+        Uses L1-level knowledge: position + obstacles + compressed target.
+        No phase/goal semantics — just "move toward target avoiding walls".
+        This is the analytical compressed-C: BFS scoring without full C.
+        """
+        from agents.doorkey_agent_c import DIR_VEC, _bfs_distance, UNREACHABLE
+
+        # Get compressed target from zC memory
+        zC = self._zC
+        target = zC.memory.get("target") if zC else None
+        if target is None:
+            # No target: basic exploration
+            if action == "forward":
+                return 0.3 if zA_next.agent_pos != zA.agent_pos else -0.1
+            return 0.05
+
+        target = tuple(target)
+        # Remove target from obstacles if needed (door is obstacle but target)
+        nav_obstacles = obstacle_set
+        if target in obstacle_set:
+            nav_obstacles = obstacle_set - {target}
+
+        if action == "forward":
+            # Wall hit check: forward didn't change position
+            if zA_next.agent_pos == zA.agent_pos:
+                return -0.1
+
+            # BFS distance after moving forward
+            d_now = _bfs_distance(zA.agent_pos, target, nav_obstacles, zA.width, zA.height)
+            d_next = _bfs_distance(zA_next.agent_pos, target, nav_obstacles, zA.width, zA.height)
+
+            if d_next >= UNREACHABLE:
+                return -0.1
+
+            score = 1.0 / (d_next + 1.0)
+            if d_next < d_now:
+                score += 0.5
+            return score
+
+        else:
+            # turn_left / turn_right: compute BFS distance from current pos
+            # toward the direction we would face after turning
+            from agents.doorkey_agent_c import _bfs_next_step
+            next_cell = _bfs_next_step(
+                zA.agent_pos, target, nav_obstacles, zA.width, zA.height)
+            if next_cell is None:
+                return 0.05
+
+            # Direction we want to face (toward BFS next step)
+            desired_dx = next_cell[0] - zA.agent_pos[0]
+            desired_dy = next_cell[1] - zA.agent_pos[1]
+            desired_dir = 0
+            for i, (ddx, ddy) in enumerate(DIR_VEC):
+                if desired_dx == ddx and desired_dy == ddy:
+                    desired_dir = i
+                    break
+
+            # How many turns from next_dir to desired_dir
+            diff = abs(next_dir - desired_dir) % 4
+            turns_remaining = min(diff, 4 - diff)
+            if turns_remaining == 0:
+                return 0.9  # Facing the right direction after this turn
+            elif turns_remaining == 1:
+                return 0.5  # One more turn needed
+            return 0.1  # Turning away
+
+    def _neural_l2_score(
+        self, zA, zA_next, action: str, next_dir: int,
+    ) -> float:
+        """Score a navigation action using DirectionPriorNet.
+
+        Uses the raw regression output (trained to approximate C's score),
+        with wall-hit penalty applied explicitly.
+        """
+        import torch
+        from models.direction_prior_net import extract_l1_features
+
+        # Explicit wall-hit check (neural net may not penalize enough)
+        if action == "forward" and zA_next.agent_pos == zA.agent_pos:
+            return -0.1
+
+        features = extract_l1_features(
+            agent_pos=zA.agent_pos,
+            agent_dir=zA.direction if zA.direction is not None else 0,
+            next_pos=zA_next.agent_pos,
+            next_dir=next_dir,
+            obstacles=set(zA.obstacles),
+            width=zA.width,
+            height=zA.height,
+            carrying_key=getattr(self.agent_c, "carrying_key", False),
+        )
+        with torch.no_grad():
+            raw = self._direction_prior_net(features.unsqueeze(0))
+            return raw.item()  # Direct regression output (MSE on C's score)
 
     # ------------------------------------------------------------------
     # Private helpers
