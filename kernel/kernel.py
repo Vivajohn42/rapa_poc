@@ -344,10 +344,6 @@ class MvpKernel:
                 self._last_decision_delta = 0.0
 
         elif l2_compressed:
-            # C compressed: use direction prior from L1 instead of full C
-            action, scored = self._compressed_l2_action(zA)
-            c_compressed = True
-
             # Track (pos, dir) for stuck detection
             direction = zA.direction if zA.direction is not None else 0
             self._replan_states.append((zA.agent_pos, direction))
@@ -355,12 +351,12 @@ class MvpKernel:
             # Track exploration progress (new cells discovered)
             self._update_exploration_progress()
 
-            # Check if B is stuck (position/direction loop OR no exploration progress)
-            trigger_burst = self._is_b_stuck()
-
-            # Also check online net confidence (low confidence -> burst)
-            if (not trigger_burst
-                    and self._online_distiller is not None
+            # Confidence-gated C-fallback: if net is enabled but confidence
+            # is below threshold for THIS tick, use C (full BFS) instead of
+            # letting B navigate poorly with low-confidence net scores.
+            # This is a per-tick "soft burst" — no N-tick commitment.
+            use_c_fallback = False
+            if (self._online_distiller is not None
                     and self._online_distiller.is_enabled):
                 target = zC.memory.get("target")
                 if target is not None:
@@ -380,7 +376,24 @@ class MvpKernel:
                         door_open=getattr(c_agent, "door_open", False),
                     )
                     if conf < self._online_distiller.confidence_threshold:
-                        trigger_burst = True
+                        use_c_fallback = True
+
+            if use_c_fallback:
+                # Net says "I'm not sure" → let C decide (full BFS)
+                action, scored = self.agent_c.choose_action(
+                    zA,
+                    self.agent_b.predict_next,
+                    memory=zC.memory,
+                    tie_break_delta=self.tie_break_delta,
+                )
+                c_compressed = False  # C is deciding
+            else:
+                # B navigates via compressed prior (net or analytical)
+                action, scored = self._compressed_l2_action(zA)
+                c_compressed = True
+
+            # Check if B is stuck (position/direction loop OR no exploration progress)
+            trigger_burst = self._is_b_stuck()
 
             if trigger_burst:
                 self._replan_burst_remaining = self._replan_burst_length

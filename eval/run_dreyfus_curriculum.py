@@ -91,7 +91,10 @@ class EpisodeMetrics:
     distiller_samples: int = 0     # total teacher samples in distiller
     distiller_accuracy: float = 0.0  # distiller eval accuracy
     distiller_acc_targeted: float = 0.0  # accuracy on targeted samples only
+    distiller_acc_frontier: float = 0.0  # accuracy on frontier samples only
     distiller_mean_conf: float = 0.0  # mean prediction confidence
+    distiller_conf_targeted: float = 0.0  # mean confidence on targeted samples
+    distiller_conf_frontier: float = 0.0  # mean confidence on frontier samples
     distiller_enabled: bool = False  # whether distiller net was active
 
 
@@ -278,7 +281,10 @@ def run_episode(
         distiller_samples=distiller.total_samples if distiller is not None else 0,
         distiller_accuracy=round(distiller.accuracy, 3) if distiller is not None else 0.0,
         distiller_acc_targeted=round(distiller.accuracy_targeted, 3) if distiller is not None else 0.0,
+        distiller_acc_frontier=round(distiller.accuracy_frontier, 3) if distiller is not None else 0.0,
         distiller_mean_conf=round(distiller.mean_confidence, 3) if distiller is not None else 0.0,
+        distiller_conf_targeted=round(distiller.mean_conf_targeted, 3) if distiller is not None else 0.0,
+        distiller_conf_frontier=round(distiller.mean_conf_frontier, 3) if distiller is not None else 0.0,
         distiller_enabled=distiller.is_enabled if distiller is not None else False,
     )
 
@@ -299,8 +305,14 @@ def run_stage(
     stage1_avg_steps: float = 0.0,
     verbose: bool = False,
     stagnation_window: int = 5,
+    min_stage2_eps: int = 0,
 ) -> StageResult:
-    """Run one Dreyfus stage, checking exit criteria each episode."""
+    """Run one Dreyfus stage, checking exit criteria each episode.
+
+    Args:
+        min_stage2_eps: For Stage 2, minimum episodes before exit is allowed.
+            This ensures the distiller has enough training time on large grids.
+    """
     window = 20
     result = StageResult(stage=stage, grid_size=size)
 
@@ -333,7 +345,9 @@ def run_stage(
             dist_info = ""
             if metrics.distiller_enabled:
                 dist_info = (f"  net=ON(t={metrics.distiller_acc_targeted:.0%}"
-                             f",c={metrics.distiller_mean_conf:.0%})")
+                             f",f={metrics.distiller_acc_frontier:.0%}"
+                             f",ct={metrics.distiller_conf_targeted:.0%}"
+                             f",cf={metrics.distiller_conf_frontier:.0%})")
             elif metrics.distiller_samples > 0:
                 dist_info = f"  net=OFF(s={metrics.distiller_samples})"
             burst_info = f"  burst={metrics.replan_burst_count}" if metrics.replan_burst_count > 0 else ""
@@ -364,6 +378,11 @@ def run_stage(
                 break
 
             elif stage == 2:
+                # Stage 2 exit: B-takeover + SR + readiness guard
+                # For large grids, ensure distiller has enough training time
+                if ep < min_stage2_eps:
+                    continue  # don't check exit yet
+
                 pct_comp = _recent_pct_c_compressed(result.episodes, window)
                 if pct_comp > 0.30 and sr > s2_thr:
                     result.exit_met = True
@@ -489,12 +508,17 @@ def run_grid_size(
         kernel_s2.set_replan_burst_params(
             stuck_window=5, burst_length=3, no_progress_threshold=30)
 
+    # Stage 2 minimum duration: ensure distiller gets enough training time
+    # on large grids before allowing exit to Stage 3.
+    min_s2_eps = {16: 60, 8: 0, 6: 0}.get(size, 0)
+
     s2 = run_stage(
         stage=2, size=size, event_d=event_d, kernel=kernel_s2,
         max_episodes=max_per_stage, max_steps=max_steps,
         seed_base=seed_base, global_ep_offset=ep_offset,
         stage1_avg_steps=s1.avg_steps_successful,
         verbose=verbose,
+        min_stage2_eps=min_s2_eps,
     )
     stage_results.append(s2)
     ep_offset += len(s2.episodes)
@@ -636,8 +660,9 @@ def save_csv(
         "pct_4fom", "pct_c_compressed", "mean_delta_8", "mean_loop_gain",
         "compression_events", "d_has_sequence",
         "replan_burst_count", "distiller_samples",
-        "distiller_accuracy", "distiller_acc_targeted",
-        "distiller_mean_conf", "distiller_enabled",
+        "distiller_accuracy", "distiller_acc_targeted", "distiller_acc_frontier",
+        "distiller_mean_conf", "distiller_conf_targeted", "distiller_conf_frontier",
+        "distiller_enabled",
     ]
 
     rows = []
@@ -662,7 +687,10 @@ def save_csv(
                     "distiller_samples": ep.distiller_samples,
                     "distiller_accuracy": ep.distiller_accuracy,
                     "distiller_acc_targeted": ep.distiller_acc_targeted,
+                    "distiller_acc_frontier": ep.distiller_acc_frontier,
                     "distiller_mean_conf": ep.distiller_mean_conf,
+                    "distiller_conf_targeted": ep.distiller_conf_targeted,
+                    "distiller_conf_frontier": ep.distiller_conf_frontier,
                     "distiller_enabled": ep.distiller_enabled,
                 })
 
@@ -679,6 +707,159 @@ def save_csv(
 # Main
 # ---------------------------------------------------------------------------
 
+def run_seed_sanity(
+    n_seeds: int,
+    size: int = 16,
+    max_per_stage: int = 80,
+) -> None:
+    """Run the curriculum over multiple seeds, report Stage3 SR mean±std.
+
+    This is a regression-protection check, not a proof.  Prints a compact
+    summary table of Stage 3 success rate per seed, plus overall stats.
+
+    Usage:
+        python eval/run_dreyfus_curriculum.py --seed-sanity 5
+    """
+    import math
+
+    max_steps = {6: 200, 8: 300, 16: 600}.get(size, 600)
+    seeds = [42 + i * 1000 for i in range(n_seeds)]
+
+    print(f"\n{'#'*60}")
+    print(f"  SEED-SANITY: {size}x{size} over {n_seeds} seeds")
+    print(f"  Max per stage: {max_per_stage}")
+    print(f"{'#'*60}")
+
+    stage3_srs: List[float] = []
+    stage3_net_on: List[bool] = []
+    per_seed_info: List[dict] = []
+
+    t0 = time.time()
+    for i, seed in enumerate(seeds):
+        print(f"\n{'='*60}")
+        print(f"  Seed {i+1}/{n_seeds}: base_seed={seed}")
+        print(f"{'='*60}")
+
+        event_d = EventPatternD()
+        stage_results, n_eps = run_grid_size(
+            size=size,
+            event_d=event_d,
+            max_per_stage=max_per_stage,
+            max_steps=max_steps,
+            seed_base=seed,
+            global_ep_offset=0,
+            verbose=False,
+        )
+
+        # Extract Stage 2 metrics
+        s2 = stage_results[1] if len(stage_results) >= 2 else None
+        stage2_eps = len(s2.episodes) if s2 else 0
+        # When did the net turn ON in Stage 2? (first episode with enabled=True)
+        net_on_ep_s2 = -1
+        s2_end_acc_t = 0.0
+        s2_end_conf_t = 0.0
+        if s2 and s2.episodes:
+            for e in s2.episodes:
+                if e.distiller_enabled and net_on_ep_s2 < 0:
+                    net_on_ep_s2 = e.stage_episode
+            s2_end_acc_t = s2.episodes[-1].distiller_acc_targeted
+            s2_end_conf_t = s2.episodes[-1].distiller_conf_targeted
+
+        # Extract Stage 3 metrics
+        s3 = stage_results[2] if len(stage_results) >= 3 else None
+        if s3 and s3.episodes:
+            successes = sum(1 for e in s3.episodes if e.success)
+            sr = successes / len(s3.episodes)
+            net_on = any(e.distiller_enabled for e in s3.episodes)
+            last_acc_t = s3.episodes[-1].distiller_acc_targeted
+            last_acc_f = s3.episodes[-1].distiller_acc_frontier
+            last_conf_t = s3.episodes[-1].distiller_conf_targeted
+            # Timeouts: episodes where agent hit max_steps
+            timeouts_s3 = sum(1 for e in s3.episodes if e.steps >= max_steps)
+            # Mean B-takeover in Stage 3
+            b_takeover_s3 = (sum(e.pct_c_compressed for e in s3.episodes)
+                             / len(s3.episodes))
+        else:
+            sr = 0.0
+            net_on = False
+            last_acc_t = 0.0
+            last_acc_f = 0.0
+            last_conf_t = 0.0
+            timeouts_s3 = 0
+            b_takeover_s3 = 0.0
+
+        stage3_srs.append(sr)
+        stage3_net_on.append(net_on)
+        per_seed_info.append({
+            "seed": seed,
+            "sr": sr,
+            "net_on": net_on,
+            "n_eps_s3": len(s3.episodes) if s3 else 0,
+            "stage2_eps": stage2_eps,
+            "net_on_ep_s2": net_on_ep_s2,
+            "timeouts_s3": timeouts_s3,
+            "b_takeover_s3": b_takeover_s3,
+            "s2_end_acc_t": s2_end_acc_t,
+            "s2_end_conf_t": s2_end_conf_t,
+            "s3_end_acc_t": last_acc_t,
+            "s3_end_conf_t": last_conf_t,
+            "acc_f": last_acc_f,
+        })
+
+    elapsed = time.time() - t0
+
+    # Compute stats
+    mean_sr = sum(stage3_srs) / len(stage3_srs)
+    variance = sum((x - mean_sr) ** 2 for x in stage3_srs) / len(stage3_srs)
+    std_sr = math.sqrt(variance)
+    min_sr = min(stage3_srs)
+    max_sr = max(stage3_srs)
+
+    # Print detailed summary
+    print(f"\n{'='*60}")
+    print(f"  SEED-SANITY RESULTS: {size}x{size}")
+    print(f"{'='*60}")
+
+    # Header row
+    print(f"\n  {'Seed':>6s}  {'SR':>5s}  {'net':>3s}  {'s2ep':>4s}  "
+          f"{'netOn':>5s}  {'tout':>4s}  {'B%s3':>5s}  "
+          f"{'at_s2':>5s}  {'ct_s2':>5s}  {'at_s3':>5s}  {'ct_s3':>5s}")
+    print(f"  {'-'*6}  {'-'*5}  {'-'*3}  {'-'*4}  "
+          f"{'-'*5}  {'-'*4}  {'-'*5}  "
+          f"{'-'*5}  {'-'*5}  {'-'*5}  {'-'*5}")
+    for info in per_seed_info:
+        net_str = "ON" if info["net_on"] else "OFF"
+        net_ep_str = (f"{info['net_on_ep_s2']:>5d}"
+                      if info["net_on_ep_s2"] >= 0 else "  n/a")
+        print(f"  {info['seed']:>6d}  {info['sr']:>4.0%}  {net_str:>3s}  "
+              f"{info['stage2_eps']:>4d}  {net_ep_str}  "
+              f"{info['timeouts_s3']:>4d}  {info['b_takeover_s3']:>4.0%}  "
+              f"{info['s2_end_acc_t']:>4.0%}  {info['s2_end_conf_t']:>4.0%}  "
+              f"{info['s3_end_acc_t']:>4.0%}  {info['s3_end_conf_t']:>4.0%}")
+
+    print(f"\n  Stage3 SR: {mean_sr:.0%} ± {std_sr:.0%}  "
+          f"(min={min_sr:.0%}, max={max_sr:.0%})")
+    print(f"  Net enabled: {sum(stage3_net_on)}/{n_seeds} seeds")
+    print(f"  Total time: {elapsed:.0f}s ({elapsed/n_seeds:.0f}s/seed)")
+
+    # Expected-signature analysis for Tweak C
+    print(f"\n  Expected Tweak-C signature:")
+    for info in per_seed_info:
+        net_ep = info["net_on_ep_s2"]
+        marker = ""
+        if info["stage2_eps"] >= 60:
+            marker += " [s2>=60]"
+        if not info["net_on"]:
+            marker += " [NET OFF: sample quality issue?]"
+        elif net_ep >= 0 and net_ep <= 20:
+            marker += " [early enable]"
+        elif net_ep >= 0:
+            marker += f" [late enable @{net_ep}]"
+        print(f"    Seed {info['seed']}: s2={info['stage2_eps']}eps, "
+              f"netOn@{net_ep}, SR={info['sr']:.0%}{marker}")
+    print()
+
+
 def main() -> bool:
     parser = argparse.ArgumentParser(
         description="Dreyfus Curriculum Runner -- Skill Acquisition per Grid Size")
@@ -692,9 +873,20 @@ def main() -> bool:
                         help="Max steps per episode (default: 200)")
     parser.add_argument("--seed", type=int, default=42,
                         help="Base seed (default: 42)")
+    parser.add_argument("--seed-sanity", type=int, default=0, metavar="N",
+                        help="Run 16x16 over N seeds, report Stage3 SR mean±std")
     parser.add_argument("--verbose", action="store_true",
                         help="Print every episode")
     args = parser.parse_args()
+
+    # Seed-sanity mode: quick multi-seed regression check
+    if args.seed_sanity > 0:
+        run_seed_sanity(
+            n_seeds=args.seed_sanity,
+            size=16,
+            max_per_stage=args.max_per_stage,
+        )
+        return True
 
     if args.sizes is not None:
         sizes = args.sizes

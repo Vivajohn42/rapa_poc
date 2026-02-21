@@ -112,6 +112,7 @@ class OnlineDistiller:
         min_mean_confidence: float = 0.45,
         lr: float = 1e-3,
         confidence_threshold: float = 0.55,
+        ema_alpha: float = 0.3,
     ):
         self.replay_max = replay_max
         self.train_interval = train_interval
@@ -120,6 +121,7 @@ class OnlineDistiller:
         self.min_targeted_eval = min_targeted_eval
         self.min_mean_confidence = min_mean_confidence
         self.confidence_threshold = confidence_threshold
+        self._ema_alpha = ema_alpha  # EMA smoothing for eval metrics
 
         # Net + optimizer
         self.net = OnlineDirectionNet()
@@ -150,6 +152,7 @@ class OnlineDistiller:
         self._n_targeted_eval: int = 0
         self._n_frontier_eval: int = 0
         self._total_samples_collected: int = 0
+        self._train_count: int = 0  # number of train() calls (for EMA init)
 
     # ------------------------------------------------------------------
     # Sample collection (called each tick from kernel)
@@ -252,18 +255,33 @@ class OnlineDistiller:
     # Training
     # ------------------------------------------------------------------
 
+    def _ema(self, old: float, new: float) -> float:
+        """Exponential moving average update.
+
+        First call (train_count==1): use raw value (no history).
+        Subsequent calls: blend with EMA alpha.
+        """
+        if self._train_count <= 1:
+            return new
+        alpha = self._ema_alpha
+        return alpha * new + (1.0 - alpha) * old
+
     def train(self, epochs: int = 1) -> float:
         """Run mini-training on train buffer, evaluate on eval buffer.
 
-        Measures (two-headed stats):
+        Measures (two-headed stats, EMA-smoothed):
         - Overall eval accuracy + mean confidence
         - Targeted-only: accuracy + mean confidence (clean navigation)
         - Frontier-only: accuracy + mean confidence (noisier exploration)
+
+        EMA smoothing prevents thrashing when the eval buffer rotates.
 
         Returns overall eval accuracy.
         """
         if len(self._train_buffer) < 10:
             return 0.0
+
+        self._train_count += 1
 
         # Train
         train_samples = list(self._train_buffer)
@@ -303,23 +321,26 @@ class OnlineDistiller:
                 eval_probs = torch.softmax(eval_logits, dim=-1)
                 eval_conf = eval_probs.max(dim=-1).values
 
-                # Overall accuracy + mean confidence
-                self._eval_accuracy = (
-                    (eval_preds == eval_labels).float().mean().item()
-                )
-                self._eval_mean_confidence = eval_conf.mean().item()
+                # Overall accuracy + mean confidence (EMA-smoothed)
+                raw_acc = (eval_preds == eval_labels).float().mean().item()
+                raw_conf = eval_conf.mean().item()
+                self._eval_accuracy = self._ema(self._eval_accuracy, raw_acc)
+                self._eval_mean_confidence = self._ema(
+                    self._eval_mean_confidence, raw_conf)
 
                 # Targeted-only (non-frontier samples)
                 targeted_mask = ~eval_frontier_mask
                 self._n_targeted_eval = int(targeted_mask.sum().item())
                 if self._n_targeted_eval >= 5:
-                    self._eval_accuracy_targeted = (
+                    raw_acc_t = (
                         (eval_preds[targeted_mask] == eval_labels[targeted_mask])
                         .float().mean().item()
                     )
-                    self._eval_mean_conf_targeted = (
-                        eval_conf[targeted_mask].mean().item()
-                    )
+                    raw_conf_t = eval_conf[targeted_mask].mean().item()
+                    self._eval_accuracy_targeted = self._ema(
+                        self._eval_accuracy_targeted, raw_acc_t)
+                    self._eval_mean_conf_targeted = self._ema(
+                        self._eval_mean_conf_targeted, raw_conf_t)
                 else:
                     self._eval_accuracy_targeted = self._eval_accuracy
                     self._eval_mean_conf_targeted = self._eval_mean_confidence
@@ -327,13 +348,15 @@ class OnlineDistiller:
                 # Frontier-only
                 self._n_frontier_eval = int(eval_frontier_mask.sum().item())
                 if self._n_frontier_eval >= 5:
-                    self._eval_accuracy_frontier = (
+                    raw_acc_f = (
                         (eval_preds[eval_frontier_mask] == eval_labels[eval_frontier_mask])
                         .float().mean().item()
                     )
-                    self._eval_mean_conf_frontier = (
-                        eval_conf[eval_frontier_mask].mean().item()
-                    )
+                    raw_conf_f = eval_conf[eval_frontier_mask].mean().item()
+                    self._eval_accuracy_frontier = self._ema(
+                        self._eval_accuracy_frontier, raw_acc_f)
+                    self._eval_mean_conf_frontier = self._ema(
+                        self._eval_mean_conf_frontier, raw_conf_f)
                 else:
                     self._eval_accuracy_frontier = self._eval_accuracy
                     self._eval_mean_conf_frontier = self._eval_mean_confidence
@@ -349,15 +372,18 @@ class OnlineDistiller:
             self._n_frontier_eval = 0
 
         # Enable if criteria met (targeted-slice gating)
-        total_replay = len(self._train_buffer) + len(self._eval_buffer)
-        if total_replay >= self.min_samples:
-            # Primary: targeted accuracy with minimum sample count
-            if (self._n_targeted_eval >= self.min_targeted_eval
-                    and self._eval_accuracy_targeted >= self.min_accuracy_targeted):
-                self._enabled = True
-            # Alternative: mean confidence over all eval samples
-            elif self._eval_mean_confidence >= self.min_mean_confidence:
-                self._enabled = True
+        # Once enabled, stays ON ("latch ON") — confidence gating at
+        # inference handles per-tick trust decisions.
+        if not self._enabled:
+            total_replay = len(self._train_buffer) + len(self._eval_buffer)
+            if total_replay >= self.min_samples:
+                # Primary: targeted accuracy with minimum sample count
+                if (self._n_targeted_eval >= self.min_targeted_eval
+                        and self._eval_accuracy_targeted >= self.min_accuracy_targeted):
+                    self._enabled = True
+                # Alternative: mean confidence over all eval samples
+                elif self._eval_mean_confidence >= self.min_mean_confidence:
+                    self._enabled = True
 
         return self._eval_accuracy
 
