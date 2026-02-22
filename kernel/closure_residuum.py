@@ -94,6 +94,7 @@ class ClosureResiduum:
         tick_id: int = 0,
         has_agent_d: bool = True,
         weakest_coupling: str = "AB",
+        meaning_report=None,         # Phase 3: MeaningReport (no tag parsing)
     ) -> ResidualSnapshot:
         """Compute closure residuum for this tick.
 
@@ -108,7 +109,8 @@ class ClosureResiduum:
         c_term = self._compute_c_term(zA, zC, scored, gC)
 
         # --- d_term: meaning-structure alignment ---
-        d_term = self._compute_d_term(zA, zC, zD, gD, has_agent_d)
+        d_term = self._compute_d_term(
+            zA, zC, zD, gD, has_agent_d, meaning_report=meaning_report)
 
         # --- Compose delta_6 and delta_8 ---
         delta_6 = math.sqrt(
@@ -300,9 +302,11 @@ class ClosureResiduum:
 
     def _compute_d_term(
         self, zA, zC, zD, gD: int, has_agent_d: bool,
+        meaning_report=None,
     ) -> float:
         """Meaning-structure alignment: D narrative vs world.
 
+        Phase 3: Uses MeaningReport fields instead of tag parsing.
         When D is active and has identified target correctly: d_term -> 0.
         When D produces grounding violations: d_term increases.
         When D is absent: carry forward with decay.
@@ -310,21 +314,23 @@ class ClosureResiduum:
         if gD == 1 and zD is not None:
             # D is active this tick — compute fresh
             target_in_memory = "target" in zC.memory
-            tags = list(zD.meaning_tags)
-            has_target_tag = any(t.startswith("target:") for t in tags)
             violations = zD.grounding_violations
+            has_suggested = (
+                meaning_report is not None
+                and meaning_report.suggested_target is not None)
 
-            if target_in_memory and has_target_tag and violations == 0:
+            if target_in_memory and has_suggested and violations == 0:
                 # D identified target correctly, no hallucinations
                 d_term = 0.0
             elif target_in_memory:
                 # Target in memory but some issues
                 d_term = 0.1 + 0.1 * violations
-            elif has_target_tag:
-                # D produced target tag but not yet in memory
+            elif has_suggested:
+                # D has suggestion but not yet in memory
                 d_term = 0.3
-            elif len(tags) > 1:
-                # D produced some tags (progress)
+            elif (meaning_report is not None
+                  and meaning_report.confidence > 0):
+                # D produced some analysis (progress)
                 d_term = 0.5
             else:
                 # D produced nothing useful

@@ -61,6 +61,24 @@ class OnlineDirectionNet(nn.Module):
             confidence = probs[direction].item()
             return direction, confidence
 
+    def predict_direction_with_trust(
+        self,
+        x: torch.Tensor,
+        trust_primitive: "TrustPrimitive",
+    ) -> Tuple[int, float, float]:
+        """Single-sample prediction: returns (direction_class, confidence, trust).
+
+        confidence = softmax max-prob (legacy metric, kept for comparison).
+        trust = TrustPrimitive signal (margin + entropy based).
+        """
+        with torch.no_grad():
+            logits = self.forward(x.unsqueeze(0)).squeeze(0)  # (4,)
+            probs = torch.softmax(logits, dim=-1)
+            direction = probs.argmax().item()
+            confidence = probs[direction].item()
+            trust = trust_primitive.compute_trust(logits)
+            return direction, confidence, trust
+
 
 def extract_online_features(
     agent_pos: Tuple[int, int],

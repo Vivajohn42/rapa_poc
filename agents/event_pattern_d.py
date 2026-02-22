@@ -427,3 +427,52 @@ class EventPatternD(StreamD):
             length_chars=len(narrative),
             grounding_violations=0,
         )
+
+    # ---- MeaningReport (D-decoupling) ----
+
+    def report_meaning(self) -> "MeaningReport":
+        """Structured meaning report for kernel consumption.
+
+        D says WHAT it sees (confidence, suggested target, events).
+        The kernel decides WHAT TO DO (regime, gating, target selection).
+        This replaces tag-parsing as the kernel-facing D interface.
+        """
+        from kernel.types import MeaningReport
+
+        step = self.current_sequence_step()
+        suggested_target = self.suggest_target()
+        suggested_phase = {
+            0: "find_key", 1: "open_door", 2: "reach_goal",
+        }.get(step)
+
+        # Confidence: 0.0 = no hypothesis, 0.5 = partial, 1.0 = full sequence
+        if self.success_sequence is not None:
+            confidence = 1.0
+        elif self.partial_hypotheses:
+            confidence = 0.5
+        else:
+            confidence = 0.0
+
+        # Hypothesis strength: ratio of confirming episodes (capped at 1.0)
+        successes = sum(1 for ep in self.episode_buffer if ep.success)
+        hypothesis_strength = (
+            min(1.0, successes / 5.0) if self.has_hypothesis else 0.0
+        )
+
+        events_detected = [e.name for e in self._episode_events]
+
+        # Narrative tags for backward compat (cheap: reuse _build_zd)
+        zd = self._build_zd("seek")
+
+        return MeaningReport(
+            confidence=confidence,
+            suggested_target=suggested_target,
+            suggested_phase=suggested_phase,
+            events_detected=events_detected,
+            hypothesis_strength=hypothesis_strength,
+            narrative_tags=list(zd.meaning_tags),
+            # Phase 3: kernel-facing fields
+            grounding_violations=0,        # Deterministic D: always 0
+            grounding_score=1.0,           # Deterministic D: always grounded
+            narrative_length=zd.length_chars,
+        )

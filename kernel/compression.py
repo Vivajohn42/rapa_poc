@@ -222,27 +222,24 @@ class CompressionController:
 def compress_l3_to_l2(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     """D's semantic knowledge → C's goal/valence state.
 
-    Extracts target and phase from D's meaning_tags.
-    This mirrors what deconstruct_doorkey_d_to_c does, but expressed
-    as dimensional reduction within the unified memory.
-
-    Note: The actual D→C deconstruction is done by memory_manager.deconstruct()
-    before this transform runs.  This transform marks the compression as complete
-    by writing a compression marker.
+    Phase 3: Reads MeaningReport fields from UM L3 (populated by
+    populate_from_meaning_report) instead of parsing meaning_tags.
+    Marks the compression as complete by writing a compression marker.
     """
     result: Dict[str, Any] = {}
 
-    # Mark that L3 content has been absorbed into L2
-    tags = snapshot.get("meaning_tags", [])
-    if tags:
+    # Read MeaningReport fields stored by populate_from_meaning_report
+    phase = snapshot.get("suggested_phase")
+    if phase:
+        result["phase"] = phase
+
+    target = snapshot.get("suggested_target")
+    if target:
+        result["target_type"] = "meaning_report"
+
+    confidence = snapshot.get("d_confidence", 0.0)
+    if confidence > 0:
         result["compressed_from_l3"] = True
-        # Extract any target/phase that D may have written
-        for tag in tags:
-            tag_l = tag.strip().lower() if isinstance(tag, str) else ""
-            if tag_l.startswith("phase:"):
-                result["phase"] = tag_l.split(":", 1)[1]
-            elif tag_l.startswith("target:"):
-                result["target_type"] = tag_l.split(":", 1)[1]
 
     return result
 

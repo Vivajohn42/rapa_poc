@@ -82,6 +82,9 @@ class MvpKernel:
         use_unified_memory: bool = False,
         active_compression: bool = False,
         online_distiller=None,
+        regime_controller=None,
+        telemetry=None,
+        max_steps: int = 200,
     ):
         self.agent_a = agent_a
         self.agent_b = agent_b
@@ -94,6 +97,10 @@ class MvpKernel:
         self._active_compression = active_compression
         self._direction_prior_net = None  # Set via set_direction_prior_net()
         self._online_distiller = online_distiller  # OnlineDistiller or None
+        self._regime_controller = regime_controller  # RegimeController or None
+        self._active_regime_steering: bool = (regime_controller is not None)
+        self._telemetry = telemetry  # Telemetry or None
+        self.max_steps = max_steps  # for budget trigger signal
 
         # Replan-burst parameters (configurable via set_replan_burst_params)
         self._replan_stuck_window: int = 5
@@ -158,14 +165,16 @@ class MvpKernel:
             )
 
         # Per-episode state
+        self._episode_step: int = 0          # current step for budget trigger
+        self._episode_stuck_ticks: int = 0   # stuck ticks for budget trigger
+        self._success_rate_ema: float = 0.0  # EMA of episode success rate
+        self._no_target_ticks: int = 0  # ticks where no target available (diagnostic)
         self._last_decision_delta: Optional[float] = None
         self._last_positions: deque = deque(maxlen=20)
         self._reward_history: deque = deque(maxlen=10)
         self._d_cooldown_until: int = -1
         self._last_deconstruct_tick: int = -999
         self._hint_just_learned: bool = False
-        self._d_last_tags: List[str] = []
-
         # C state (managed by kernel)
         self._zC: Optional[ZC] = None
 
@@ -175,14 +184,13 @@ class MvpKernel:
 
     def reset_episode(self, goal_mode: str = "seek", episode_id: str = "") -> ZC:
         """Reset kernel state for a new episode."""
+        self._no_target_ticks = 0
         self._last_decision_delta = None
         self._last_positions.clear()
         self._reward_history.clear()
         self._d_cooldown_until = -1
         self._last_deconstruct_tick = -999
         self._hint_just_learned = False
-        self._d_last_tags = []
-
         # Reset replan-burst state
         self._replan_states.clear()
         self._replan_burst_remaining = 0
@@ -214,6 +222,18 @@ class MvpKernel:
             self.agent_d.events.clear()
             if hasattr(self.agent_d, "seen_positions"):
                 self.agent_d.seen_positions.clear()
+
+        # Reset regime controller (active overlay steering)
+        if self._regime_controller is not None:
+            self._regime_controller.reset_episode()
+
+        # Reset episode-scoped telemetry metrics
+        if self._telemetry is not None:
+            self._telemetry.metrics.reset_episode()
+
+        # Per-episode success rate tracking (for trigger signals)
+        self._episode_step: int = 0
+        self._episode_stuck_ticks: int = 0
 
         return self._zC
 
@@ -254,18 +274,24 @@ class MvpKernel:
             self.agent_d.observe_step(
                 t=t, zA=zA, action="hint", reward=0.0, done=False
             )
-            zD_hint = self.agent_d.build_micro(
+            # build_micro stays: D needs it for internal state update
+            self.agent_d.build_micro(
                 goal_mode=zC.goal_mode,
                 goal_pos=(-1, -1),
                 last_n=1,
             )
+            # Phase 3: read MeaningReport instead of parsing ZD tags
             old_target = zC.memory.get("target")
-            zC = self._memory._deconstruct_fn(zC, zD_hint, goal_map=self.goal_map)
+            _hint_report = self.agent_d.report_meaning()
+            # Always write target (even None) to clear stale targets
+            zC.memory["target"] = _hint_report.suggested_target
+            if _hint_report.suggested_phase is not None:
+                zC.memory["phase"] = _hint_report.suggested_phase
             zC.memory["episode_id"] = self._zC.memory.get("episode_id", "")
             new_target = zC.memory.get("target")
             self._hint_just_learned = (new_target != old_target and new_target is not None)
             self._zC = zC
-            # UM shadow: sync L2 after hint deconstruction
+            # UM shadow: sync L2 after hint capture
             if self._unified_memory is not None:
                 self._unified_memory.populate_from_zC(zC, t)
 
@@ -287,6 +313,99 @@ class MvpKernel:
 
         # ---- 4. Route ----
         gC, gD, route_decon, reasons = self._route(t, signals)
+
+        # ---- 4a. Regime overlay (constrains _route output) ----
+        gC, gD, route_decon, reasons = self._apply_regime_overlay(
+            gC, gD, route_decon, reasons)
+
+        # ---- 4b. Regime computation (for next tick's overlay) ----
+        self._episode_step = t
+        if stuck:
+            self._episode_stuck_ticks += 1
+        shadow_regime = None
+        if self._regime_controller is not None:
+            from kernel.regime import compute_triggers
+            # Gather observables for trigger computation
+            _latest_residual = (
+                self._residuum.episode_history[-1]
+                if self._residuum.episode_history else None
+            )
+            _delta_8 = _latest_residual.delta_8 if _latest_residual else 0.0
+            _inv_count = (
+                self._unified_memory.invalidation_count
+                if self._unified_memory is not None
+                and hasattr(self._unified_memory, "invalidation_count")
+                else 0
+            )
+            _distiller_mode_str = "OFF"
+            _distiller_acc = 0.0
+            _l2_comp = False
+            if self._online_distiller is not None:
+                _distiller_mode_str = self._online_distiller.mode.name
+                _distiller_acc = getattr(
+                    self._online_distiller, "_eval_accuracy", 0.0)
+            if (self._unified_memory is not None
+                    and self._unified_memory.is_compressed("L2")):
+                _l2_comp = True
+            _target_known = (
+                "target" in zC.memory
+                and zC.memory.get("target") is not None
+            )
+            # New cells ratio: from ObjectMemory if available
+            _om = getattr(self.agent_c, "_object_memory", None)
+            _new_cells_ratio = 0.0
+            if _om is not None:
+                _total = max(1, zA.width * zA.height)
+                _known = len(getattr(_om, "known_empty", set())) + len(
+                    getattr(_om, "known_walls", set()))
+                _new_cells_ratio = min(1.0, _known / _total)
+
+            triggers = compute_triggers(
+                td_err=signals.td_err,
+                delta_8=_delta_8,
+                invalidation_count=_inv_count,
+                target_known=_target_known,
+                new_cells_ratio=_new_cells_ratio,
+                success_rate_ema=self._success_rate_ema,
+                distiller_mode=_distiller_mode_str,
+                l2_compressed=_l2_comp,
+                distiller_accuracy=_distiller_acc,
+                mem_cost=signals.mem_cost,
+                stuck_ticks=self._episode_stuck_ticks,
+                max_steps=self.max_steps,
+                current_step=t,
+            )
+            shadow_regime = self._regime_controller.update(
+                triggers, episode_end=done)
+
+            # Training interval modulation (GOALSEEK → fast training)
+            if (self._active_regime_steering
+                    and self._online_distiller is not None):
+                _gates = self._regime_controller.gates()
+                if _gates.training_interval_key == "fast":
+                    self._online_distiller.train_interval = 1
+                    self._online_distiller.train_interval_post_enable = 1
+                else:
+                    self._online_distiller.train_interval = 3
+                    self._online_distiller.train_interval_post_enable = 2
+
+            if self._telemetry is not None:
+                shadow_gates = self._regime_controller.gates()
+                self._telemetry.metrics.gauge(
+                    "ep.regime", float(shadow_regime.value))
+                self._telemetry.events.emit(
+                    "regime_tick",
+                    regime=shadow_regime.name,
+                    triggers={
+                        "s": triggers.surprise, "p": triggers.progress,
+                        "r": triggers.readiness, "b": triggers.budget,
+                    },
+                    gates={
+                        "gC": shadow_gates.gC, "gD": shadow_gates.gD,
+                        "b_may": shadow_gates.b_may_takeover,
+                    },
+                    step=t,
+                )
 
         # ---- 5. Schedule ----
         # 6FoM+D overlay: D runs out-of-band, not in schedule
@@ -316,14 +435,30 @@ class MvpKernel:
             self.agent_c.goal.target = None
 
         # Active Mode: check if L2 is compressed -> C runs in compressed mode
-        # C only runs compressed if a target is known (direction_prior needs it)
-        l2_compressed = (
+        # Two paths to L2-compressed:
+        #   (a) UM says L2 compressed AND zC.memory has explicit target (D's deconstruction)
+        #   (b) Distiller has a resolved target AND is EXPERT for that kind
+        # Path (b) enables B-takeover during FRONTIER exploration, where
+        # zC.memory["target"] is never set but _resolve_target_active finds one.
+        _um_l2 = (
             self._active_compression
             and self._unified_memory is not None
             and self._unified_memory.is_compressed("L2")
-            and "target" in zC.memory
+        )
+        _has_explicit_target = (
+            "target" in zC.memory
             and zC.memory.get("target") is not None
         )
+        _distiller_ready = False
+        if self._online_distiller is not None and _um_l2:
+            from agents.online_distiller import DistillerMode
+            _res_target, _res_kind = self._resolve_target_active(zA, zC)
+            if _res_target is not None:
+                _distiller_ready = (
+                    self._online_distiller.mode_for(_res_kind)
+                    == DistillerMode.EXPERT
+                )
+        l2_compressed = _um_l2 and (_has_explicit_target or _distiller_ready)
 
         burst_active = False  # True if this tick is a replan-burst tick
 
@@ -351,32 +486,52 @@ class MvpKernel:
             # Track exploration progress (new cells discovered)
             self._update_exploration_progress()
 
-            # Confidence-gated C-fallback: if net is enabled but confidence
-            # is below threshold for THIS tick, use C (full BFS) instead of
-            # letting B navigate poorly with low-confidence net scores.
-            # This is a per-tick "soft burst" — no N-tick commitment.
+            # Regime gate: b_may_takeover (hard block)
+            _regime_b_blocked = False
+            if (self._active_regime_steering
+                    and self._regime_controller is not None):
+                _regime_b_blocked = (
+                    not self._regime_controller.gates().b_may_takeover)
+
+            # Per-kind mode + trust gating for C-fallback.
+            # REAL: EXPERT + hard trust gate (conservative)
+            # FRONTIER: EXPERT → B takes over (trust as score weight only)
             use_c_fallback = False
-            if (self._online_distiller is not None
-                    and self._online_distiller.is_enabled):
-                target = zC.memory.get("target")
-                if target is not None:
-                    c_agent = self.agent_c
-                    phase_int = {"FIND_KEY": 0, "OPEN_DOOR": 1,
-                                 "REACH_GOAL": 2}.get(
-                        getattr(c_agent, "phase", "FIND_KEY"), 0)
-                    _, conf = self._online_distiller.predict(
-                        agent_pos=zA.agent_pos,
-                        target=tuple(target),
-                        agent_dir=direction,
-                        obstacles=set(zA.obstacles),
-                        width=zA.width,
-                        height=zA.height,
-                        phase=phase_int,
-                        carrying_key=getattr(c_agent, "carrying_key", False),
-                        door_open=getattr(c_agent, "door_open", False),
-                    )
-                    if conf < self._online_distiller.confidence_threshold:
-                        use_c_fallback = True
+            if _regime_b_blocked:
+                use_c_fallback = True  # Regime says: C decides
+            elif self._online_distiller is not None:
+                from agents.online_distiller import DistillerMode, TargetKind
+                target_tk, current_kind = self._resolve_target_active(
+                    zA, zC)
+                if target_tk is not None:
+                    mode_k = self._online_distiller.mode_for(current_kind)
+                    if mode_k == DistillerMode.EXPERT:
+                        if current_kind == TargetKind.REAL:
+                            # REAL: hard trust gate
+                            c_agent = self.agent_c
+                            phase_int = {"FIND_KEY": 0, "OPEN_DOOR": 1,
+                                         "REACH_GOAL": 2}.get(
+                                getattr(c_agent, "phase", "FIND_KEY"), 0)
+                            _, _conf, trust = self._online_distiller.predict(
+                                agent_pos=zA.agent_pos,
+                                target=tuple(target_tk),
+                                agent_dir=direction,
+                                obstacles=set(zA.obstacles),
+                                width=zA.width,
+                                height=zA.height,
+                                phase=phase_int,
+                                carrying_key=getattr(
+                                    c_agent, "carrying_key", False),
+                                door_open=getattr(
+                                    c_agent, "door_open", False),
+                            )
+                            if trust < self._online_distiller.trust_threshold:
+                                use_c_fallback = True
+                        # FRONTIER EXPERT: no hard trust gate, B takes over
+                    else:
+                        use_c_fallback = True  # not EXPERT for this kind
+                else:
+                    use_c_fallback = True  # no target available
 
             if use_c_fallback:
                 # Net says "I'm not sure" → let C decide (full BFS)
@@ -428,32 +583,15 @@ class MvpKernel:
                 and gC == 1
                 and action is not None
                 and scored is not None):
-            # Get target from C's actual knowledge (not just zC.memory)
-            c_agent = self.agent_c
-            target = zC.memory.get("target") if zC else None
-            _is_frontier = False
-            if target is None:
-                # Fallback: derive from C's phase-specific state
-                c_phase = getattr(c_agent, "phase", "FIND_KEY")
-                if c_phase == "FIND_KEY":
-                    target = getattr(c_agent, "key_pos", None)
-                elif c_phase == "OPEN_DOOR":
-                    target = getattr(c_agent, "door_pos", None)
-                elif c_phase == "REACH_GOAL":
-                    target = zC.memory.get("goal_pos") if zC else None
-            if target is None:
-                # Frontier pseudo-target: use nearest frontier cell as proxy
-                # This enables distiller sample collection during exploration
-                # (the dominant phase on large grids like 16x16)
-                target = self._nearest_frontier_target(zA)
-                _is_frontier = (target is not None)
-            if target is not None:
+            target_cs, target_kind_cs = self._resolve_target_active(zA, zC)
+            if target_cs is not None:
+                c_agent = self.agent_c
                 phase_int = {"FIND_KEY": 0, "OPEN_DOOR": 1,
                              "REACH_GOAL": 2}.get(
                     getattr(c_agent, "phase", "FIND_KEY"), 0)
                 self._online_distiller.collect_sample(
                     agent_pos=zA.agent_pos,
-                    target=tuple(target),
+                    target=tuple(target_cs),
                     agent_dir=zA.direction if zA.direction is not None else 0,
                     obstacles=set(zA.obstacles),
                     width=zA.width,
@@ -463,8 +601,10 @@ class MvpKernel:
                     door_open=getattr(c_agent, "door_open", False),
                     c_action=action,
                     c_scored=scored,
-                    is_frontier=_is_frontier,
+                    target_kind=target_kind_cs,
                 )
+            else:
+                self._no_target_ticks += 1
 
         # ---- 9. D out-of-band (if gD=1) ----
         d_activated = False
@@ -499,10 +639,11 @@ class MvpKernel:
                 goal_pos=(-1, -1),
                 last_n=5,
             )
-            self._d_last_tags = list(zD.meaning_tags)
-            # UM shadow: sync L3 from D's analysis
+            # Phase 3: UM sync via MeaningReport (no tag parsing)
             if self._unified_memory is not None:
-                self._unified_memory.populate_from_zD(zD, t)
+                _d_report = self.agent_d.report_meaning()
+                self._unified_memory.populate_from_meaning_report(
+                    _d_report, t)
         elif self.agent_d is not None:
             # D observes but doesn't build (cheap recording)
             self.agent_d.observe_step(
@@ -513,7 +654,10 @@ class MvpKernel:
         decon_fired = False
         do_decon = self._should_deconstruct(t, gD, signals, route_decon, reasons)
         if do_decon and zD is not None:
-            zC = self._memory.deconstruct(zC, zD, goal_map=self.goal_map)
+            _decon_report = self.agent_d.report_meaning() if self.agent_d else None
+            zC = self._memory.deconstruct(
+                zC, zD, goal_map=self.goal_map,
+                meaning_report=_decon_report)
             zC.memory["episode_id"] = self._zC.memory.get("episode_id", "")
             self._zC = zC
             self._last_deconstruct_tick = t
@@ -527,7 +671,10 @@ class MvpKernel:
             zD_final = self.agent_d.build(
                 goal_mode=zC.goal_mode, goal_pos=(-1, -1),
             )
-            zC = self._memory.deconstruct(zC, zD_final, goal_map=self.goal_map)
+            _ep_report = self.agent_d.report_meaning()
+            zC = self._memory.deconstruct(
+                zC, zD_final, goal_map=self.goal_map,
+                meaning_report=_ep_report)
             zC.memory["episode_id"] = self._zC.memory.get("episode_id", "")
             self._zC = zC
             # UM shadow: sync L2 after episode-end deconstruction
@@ -538,6 +685,10 @@ class MvpKernel:
         d_seen = None
         if self.agent_d is not None and hasattr(self.agent_d, "seen_positions"):
             d_seen = self.agent_d.seen_positions
+
+        # Phase 3: MeaningReport for tag-free g_DC/g_AD/d_term
+        _tick_report = (self.agent_d.report_meaning()
+                        if self.agent_d is not None else None)
 
         gain = self._loop_gain.compute_tick(
             zA=zA,
@@ -551,6 +702,7 @@ class MvpKernel:
             predict_next_fn=self.agent_b.predict_next,
             d_seen_positions=d_seen,
             has_agent_d=(self.agent_d is not None),
+            meaning_report=_tick_report,
         )
 
         # ---- 12. Closure Residuum ----
@@ -565,6 +717,7 @@ class MvpKernel:
             tick_id=t,
             has_agent_d=(self.agent_d is not None),
             weakest_coupling=gain.weakest_coupling,
+            meaning_report=_tick_report,
         )
 
         # ---- 13. Cascaded Compression (RAPA v2 Unified Memory) ----
@@ -598,6 +751,8 @@ class MvpKernel:
             c_compressed=c_compressed,
             d_suppressed=d_suppressed,
             replan_burst_active=burst_active,
+            regime=(
+                shadow_regime.name if shadow_regime is not None else None),
         )
 
     @property
@@ -630,6 +785,23 @@ class MvpKernel:
     def compression(self) -> Optional[CompressionController]:
         """Compression controller (None if use_unified_memory=False)."""
         return self._compression
+
+    @property
+    def regime_controller(self):
+        """Regime controller (active overlay steering in Phase 2)."""
+        return self._regime_controller
+
+    @property
+    def telemetry(self):
+        """Telemetry subsystem (None if not configured)."""
+        return self._telemetry
+
+    def update_success_rate(self, success: bool, alpha: float = 0.1) -> None:
+        """Update EMA of episode success rate (for regime trigger signals)."""
+        val = 1.0 if success else 0.0
+        self._success_rate_ema = (
+            alpha * val + (1.0 - alpha) * self._success_rate_ema
+        )
 
     # ------------------------------------------------------------------
     # Active Compression API
@@ -665,6 +837,11 @@ class MvpKernel:
         """Number of replan-burst activations this episode."""
         return self._replan_burst_count
 
+    @property
+    def no_target_ticks(self) -> int:
+        """Ticks where no target was available (diagnostic counter)."""
+        return self._no_target_ticks
+
     def _compressed_l2_action(
         self, zA,
     ) -> Tuple[str, List[Tuple[str, float]]]:
@@ -681,10 +858,10 @@ class MvpKernel:
         direction = zA.direction if zA.direction is not None else 0
         obstacle_set = set(zA.obstacles)
 
-        # Compute live direction_prior from current position + compressed target
+        # Compute live direction_prior from current position + resolved target
         # (Static UM L1 prior is stale after agent moves — must recompute)
         zC = self._zC
-        target = zC.memory.get("target") if zC else None
+        target, _current_kind = self._resolve_target_active(zA, zC)
         direction_prior: List[str] = []
         if target is not None:
             dx = target[0] - zA.agent_pos[0]
@@ -722,9 +899,11 @@ class MvpKernel:
             next_dir = zA_next.direction if zA_next.direction is not None else 0
 
             if action in ("turn_left", "turn_right", "forward"):
+                from agents.online_distiller import DistillerMode
                 if (self._online_distiller is not None
-                        and self._online_distiller.is_enabled
-                        and target is not None):
+                        and target is not None
+                        and self._online_distiller.mode_for(_current_kind)
+                        == DistillerMode.EXPERT):
                     # Priority 1: Online direction net (learned from C)
                     score = self._online_net_l2_score(
                         zA, zA_next, action, direction, next_dir,
@@ -889,7 +1068,7 @@ class MvpKernel:
         phase_int = {"FIND_KEY": 0, "OPEN_DOOR": 1, "REACH_GOAL": 2}.get(
             getattr(c_agent, "phase", "FIND_KEY"), 0)
 
-        predicted_dir, confidence = self._online_distiller.predict(
+        predicted_dir, _confidence, trust = self._online_distiller.predict(
             agent_pos=zA.agent_pos,
             target=target,
             agent_dir=direction,
@@ -901,8 +1080,8 @@ class MvpKernel:
             door_open=getattr(c_agent, "door_open", False),
         )
 
-        # Low confidence -> return modest score; replan-burst will handle
-        if confidence < self._online_distiller.confidence_threshold:
+        # Low trust -> return modest score; replan-burst will handle
+        if trust < self._online_distiller.trust_threshold:
             if action == "forward":
                 return 0.1 if zA_next.agent_pos != zA.agent_pos else -0.1
             return 0.05
@@ -913,7 +1092,7 @@ class MvpKernel:
                 return -0.1
             # Is the agent facing the predicted direction?
             if direction == predicted_dir:
-                return 1.0 * confidence
+                return 1.0 * trust
             return 0.2  # Moving but not in predicted direction
 
         else:
@@ -921,9 +1100,9 @@ class MvpKernel:
             diff = abs(next_dir - predicted_dir) % 4
             turns_remaining = min(diff, 4 - diff)
             if turns_remaining == 0:
-                return 0.9 * confidence  # Aligned after this turn
+                return 0.9 * trust  # Aligned after this turn
             elif turns_remaining == 1:
-                return 0.5 * confidence
+                return 0.5 * trust
             return 0.1
 
     # ------------------------------------------------------------------
@@ -1002,6 +1181,37 @@ class MvpKernel:
 
         return gC, gD, decon, reasons
 
+    def _apply_regime_overlay(
+        self, gC: int, gD: int, route_decon: bool, reasons: list[str],
+    ) -> tuple[int, int, bool, list[str]]:
+        """Apply regime gates as constraints over _route() output.
+
+        Overlay semantics: gates only RESTRICT, never expand.
+        If the regime controller is absent or regime steering is off,
+        returns inputs unchanged (Stage 1 compatibility).
+        """
+        if not self._active_regime_steering or self._regime_controller is None:
+            return gC, gD, route_decon, reasons
+
+        gates = self._regime_controller.gates()
+
+        # gC: regime can suppress C (CONSOLIDATE: gC=0)
+        if gates.gC == 0:
+            gC = 0
+
+        # gD: regime can suppress D (EXPLORE, GOALSEEK: gD=0)
+        if gates.gD == 0:
+            gD = 0
+
+        # Decon: regime can suppress out-of-band decon
+        # EPISODE_END always fires regardless of regime
+        if not gates.allow_decon:
+            if route_decon and "EPISODE_END" not in reasons:
+                route_decon = False
+                reasons = [r for r in reasons if r == "EPISODE_END"]
+
+        return gC, gD, route_decon, reasons
+
     def _is_stuck(self) -> bool:
         """Check if agent is stuck (same position for stuck_window ticks)."""
         if len(self._last_positions) < self.stuck_window:
@@ -1053,6 +1263,51 @@ class MvpKernel:
             return True
 
         return False
+
+    def _resolve_target_via_meaning(
+        self, zA, zC,
+    ) -> Tuple[Optional[Tuple[int, int]], str]:
+        """Target resolution via MeaningReport.
+
+        D reports meaning, kernel decides. No phase-specific if-chains.
+        Returns (target, source) where source is "meaning"/"memory"/"frontier".
+
+        Phase 2.5: active target resolution path (replaces tag-parsing).
+        """
+        # 1. D's MeaningReport
+        if (self.agent_d is not None
+                and hasattr(self.agent_d, "report_meaning")):
+            from kernel.types import MeaningReport
+            report = self.agent_d.report_meaning()
+            if (report.confidence >= 0.5
+                    and report.suggested_target is not None):
+                return (tuple(report.suggested_target), "meaning")
+
+        # 2. Memory-based (zC.memory["target"])
+        target = zC.memory.get("target") if zC else None
+        if target is not None:
+            return (tuple(target), "memory")
+
+        # 3. Frontier fallback
+        t = self._nearest_frontier_target(zA)
+        return (t, "frontier")  # t can be None
+
+    def _resolve_target_active(
+        self, zA, zC,
+    ) -> Tuple[Optional[Tuple[int, int]], "TargetKind"]:
+        """Target resolution via MeaningReport (Phase 3: always active).
+
+        D's MeaningReport provides the target, source maps to TargetKind
+        for distiller compatibility:
+          "meaning" / "memory" → REAL (concrete object target)
+          "frontier"           → FRONTIER (exploration pseudo-target)
+        """
+        from agents.online_distiller import TargetKind
+
+        target, source = self._resolve_target_via_meaning(zA, zC)
+        kind = (TargetKind.REAL if source in ("meaning", "memory")
+                else TargetKind.FRONTIER)
+        return (target, kind)
 
     def _nearest_frontier_target(self, zA) -> Optional[Tuple[int, int]]:
         """Find nearest frontier cell from ObjectMemory as pseudo-target.

@@ -167,10 +167,26 @@ class UnifiedMemory:
             self.write("phase", mem["phase"], "L2", tick)
 
     def populate_from_zD(self, zD: Any, tick: int) -> None:
-        """Sync L3 from Stream D output (ZD Pydantic model)."""
+        """Sync L3 from Stream D output (ZD Pydantic model).
+
+        Legacy path — kept for backward compat with eval scripts that
+        bypass the kernel.  The kernel uses populate_from_meaning_report().
+        """
         self.write("meaning_tags", list(zD.meaning_tags), "L3", tick)
         self.write("narrative", zD.narrative, "L3", tick)
         self.write("grounding_violations", zD.grounding_violations, "L3", tick)
+
+    def populate_from_meaning_report(self, report: Any, tick: int) -> None:
+        """Sync L3 from MeaningReport (Phase 3: replaces populate_from_zD).
+
+        Stores structured fields instead of raw meaning_tags.  The
+        compression pipeline (compress_l3_to_l2) reads these fields.
+        """
+        self.write("suggested_target", report.suggested_target, "L3", tick)
+        self.write("suggested_phase", report.suggested_phase, "L3", tick)
+        self.write("d_confidence", report.confidence, "L3", tick)
+        self.write("grounding_violations", report.grounding_violations, "L3", tick)
+        self.write("narrative_length", report.narrative_length, "L3", tick)
 
     # ------------------------------------------------------------------
     # Delta mapping

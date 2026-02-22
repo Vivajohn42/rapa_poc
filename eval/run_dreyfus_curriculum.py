@@ -49,7 +49,9 @@ from agents.event_pattern_d import EventPatternD, DoorKeyEventType
 from agents.object_memory import ObjectMemory
 from kernel.kernel import MvpKernel
 from router.deconstruct_doorkey import deconstruct_doorkey_d_to_c
-from agents.online_distiller import OnlineDistiller
+from agents.online_distiller import OnlineDistiller, DistillerMode, TargetKind
+from kernel.regime import RegimeController, DefRegime
+from kernel.telemetry import Telemetry
 
 FALLBACK_ACTIONS = ["turn_left", "turn_right", "forward", "pickup", "toggle"]
 
@@ -88,14 +90,28 @@ class EpisodeMetrics:
     pct_4fom: float = 0.0
     pct_c_compressed: float = 0.0  # fraction of ticks where B took over from C
     replan_burst_count: int = 0    # replan-burst activations this episode
-    distiller_samples: int = 0     # total teacher samples in distiller
+    distiller_samples: int = 0     # total teacher samples flushed to replay
+    distiller_replay: int = 0      # current replay buffer size (train+eval)
     distiller_accuracy: float = 0.0  # distiller eval accuracy
     distiller_acc_targeted: float = 0.0  # accuracy on targeted samples only
     distiller_acc_frontier: float = 0.0  # accuracy on frontier samples only
     distiller_mean_conf: float = 0.0  # mean prediction confidence
     distiller_conf_targeted: float = 0.0  # mean confidence on targeted samples
     distiller_conf_frontier: float = 0.0  # mean confidence on frontier samples
+    distiller_mean_trust: float = 0.0    # mean trust (margin+entropy) on eval set
+    distiller_trust_targeted: float = 0.0  # mean trust on targeted samples
+    distiller_trust_frontier: float = 0.0  # mean trust on frontier samples
     distiller_enabled: bool = False  # whether distiller net was active
+    distiller_mode: str = "OFF"      # overall mode: OFF / APPRENTICE / EXPERT
+    distiller_mode_real: str = "OFF"    # per-kind mode for REAL
+    distiller_mode_frontier: str = "OFF"  # per-kind mode for FRONTIER
+    distiller_n_targeted: int = 0    # total targeted samples seen (at collection)
+    distiller_n_targeted_eval: int = 0  # targeted samples in eval buffer
+    distiller_n_frontier: int = 0    # total frontier samples seen
+    distiller_n_frontier_eval: int = 0  # frontier samples in eval buffer
+    distiller_train_count: int = 0   # number of train() calls so far
+    no_target_ticks: int = 0         # ticks where no target was available
+    regime: str = "ORIENT"            # active DEF regime (dominant this episode)
 
 
 @dataclass
@@ -191,6 +207,7 @@ def run_episode(
 
     # Metrics collectors
     regime_counter: Dict[str, int] = defaultdict(int)
+    shadow_regime_counter: Dict[str, int] = defaultdict(int)
     compression_events: List[str] = []
     delta_8_values: List[float] = []
     loop_gain_values: List[float] = []
@@ -229,6 +246,10 @@ def run_episode(
         if result.c_compressed:
             c_compressed_ticks += 1
 
+        # Track active regime per tick (skip CONSOLIDATE which is only episode-end)
+        if result.regime is not None:
+            shadow_regime_counter[result.regime] += 1
+
         if result.residual is not None:
             delta_8_values.append(result.residual.delta_8)
 
@@ -253,6 +274,31 @@ def run_episode(
     distiller = getattr(kernel, '_online_distiller', None)
     if distiller is not None:
         distiller.end_episode(success=success)
+
+    # Update success rate EMA (for regime trigger signals)
+    kernel.update_success_rate(success)
+
+    # Shadow regime: dominant regime during episode (excl. CONSOLIDATE)
+    _regime_ctrl = kernel.regime_controller
+    _non_consol = {k: v for k, v in shadow_regime_counter.items()
+                   if k != "CONSOLIDATE"}
+    if _non_consol:
+        _shadow_regime_name = max(_non_consol, key=_non_consol.get)
+    elif _regime_ctrl is not None:
+        _shadow_regime_name = _regime_ctrl.current.name
+    else:
+        _shadow_regime_name = "ORIENT"
+
+    # Telemetry: emit episode_end event
+    _tel = kernel.telemetry
+    if _tel is not None:
+        _tel.events.emit(
+            "episode_end",
+            success=success,
+            steps=step_count,
+            regime=_shadow_regime_name,
+            stage=stage,
+        )
 
     env.close()
 
@@ -279,13 +325,30 @@ def run_episode(
         pct_c_compressed=round(pct_c_comp, 3),
         replan_burst_count=kernel.replan_burst_count,
         distiller_samples=distiller.total_samples if distiller is not None else 0,
+        distiller_replay=distiller.replay_size if distiller is not None else 0,
         distiller_accuracy=round(distiller.accuracy, 3) if distiller is not None else 0.0,
         distiller_acc_targeted=round(distiller.accuracy_targeted, 3) if distiller is not None else 0.0,
         distiller_acc_frontier=round(distiller.accuracy_frontier, 3) if distiller is not None else 0.0,
         distiller_mean_conf=round(distiller.mean_confidence, 3) if distiller is not None else 0.0,
         distiller_conf_targeted=round(distiller.mean_conf_targeted, 3) if distiller is not None else 0.0,
         distiller_conf_frontier=round(distiller.mean_conf_frontier, 3) if distiller is not None else 0.0,
+        distiller_mean_trust=round(distiller.mean_trust, 3) if distiller is not None else 0.0,
+        distiller_trust_targeted=round(distiller.mean_trust_targeted, 3) if distiller is not None else 0.0,
+        distiller_trust_frontier=round(distiller.mean_trust_frontier, 3) if distiller is not None else 0.0,
         distiller_enabled=distiller.is_enabled if distiller is not None else False,
+        distiller_mode=distiller.mode.name if distiller is not None else "OFF",
+        distiller_mode_real=(distiller.mode_for(TargetKind.REAL).name
+                             if distiller is not None else "OFF"),
+        distiller_mode_frontier=(distiller.mode_for(TargetKind.FRONTIER).name
+                                 if distiller is not None else "OFF"),
+        distiller_n_targeted=distiller.n_targeted_total if distiller is not None else 0,
+        distiller_n_targeted_eval=distiller.n_targeted_eval if distiller is not None else 0,
+        distiller_n_frontier=distiller.n_frontier_total if distiller is not None else 0,
+        distiller_n_frontier_eval=(distiller.n_eval_for(TargetKind.FRONTIER)
+                                   if distiller is not None else 0),
+        distiller_train_count=distiller.train_count if distiller is not None else 0,
+        no_target_ticks=kernel.no_target_ticks,
+        regime=_shadow_regime_name,
     )
 
 
@@ -306,12 +369,15 @@ def run_stage(
     verbose: bool = False,
     stagnation_window: int = 5,
     min_stage2_eps: int = 0,
+    fast_fail: bool = False,
 ) -> StageResult:
     """Run one Dreyfus stage, checking exit criteria each episode.
 
     Args:
         min_stage2_eps: For Stage 2, minimum episodes before exit is allowed.
             This ensures the distiller has enough training time on large grids.
+        fast_fail: If True, abort Stage 2 after 10 episodes if distiller
+            is not making progress (FRONTIER still OFF, too few samples, etc.).
     """
     window = 20
     result = StageResult(stage=stage, grid_size=size)
@@ -343,18 +409,38 @@ def run_stage(
             status = "OK" if metrics.success else "FAIL"
             comp = ",".join(metrics.compression_events) if metrics.compression_events else "-"
             dist_info = ""
-            if metrics.distiller_enabled:
-                dist_info = (f"  net=ON(t={metrics.distiller_acc_targeted:.0%}"
-                             f",f={metrics.distiller_acc_frontier:.0%}"
-                             f",ct={metrics.distiller_conf_targeted:.0%}"
-                             f",cf={metrics.distiller_conf_frontier:.0%})")
-            elif metrics.distiller_samples > 0:
-                dist_info = f"  net=OFF(s={metrics.distiller_samples})"
+            mode_str = metrics.distiller_mode
+            mr = metrics.distiller_mode_real[0]   # O/A/E
+            mf = metrics.distiller_mode_frontier[0]  # O/A/E
+            if mode_str == "EXPERT":
+                dist_info = (f"  EXP(R={mr},F={mf}"
+                             f",at={metrics.distiller_acc_targeted:.0%}"
+                             f",af={metrics.distiller_acc_frontier:.0%}"
+                             f",tt={metrics.distiller_trust_targeted:.0%}"
+                             f",tf={metrics.distiller_trust_frontier:.0%}"
+                             f",tc={metrics.distiller_train_count})")
+            elif mode_str == "APPRENTICE":
+                dist_info = (f"  APR(R={mr},F={mf}"
+                             f",at={metrics.distiller_acc_targeted:.0%}"
+                             f",af={metrics.distiller_acc_frontier:.0%}"
+                             f",tc={metrics.distiller_train_count})")
+            elif metrics.distiller_samples > 0 or (
+                    metrics.distiller_n_targeted + metrics.distiller_n_frontier) > 0:
+                seen = metrics.distiller_n_targeted + metrics.distiller_n_frontier
+                dist_info = (f"  OFF(seen={seen}"
+                             f",replay={metrics.distiller_replay}"
+                             f",nt={metrics.distiller_n_targeted}"
+                             f",nf={metrics.distiller_n_frontier}"
+                             f",tc={metrics.distiller_train_count})")
+            nt_info = (f"  nt0={metrics.no_target_ticks}"
+                       if metrics.no_target_ticks > 0 else "")
             burst_info = f"  burst={metrics.replan_burst_count}" if metrics.replan_burst_count > 0 else ""
+            reg_info = (f"  reg={metrics.regime}"
+                        if metrics.regime != "ORIENT" else "")
             print(f"  ep {ep:3d}: {status:4s}  steps={metrics.steps:3d}  "
                   f"SR={sr:.0%}  B={metrics.pct_c_compressed:.0%}  "
                   f"comp=[{comp}]  d8={metrics.mean_delta_8:.3f}"
-                  f"{burst_info}{dist_info}")
+                  f"{burst_info}{dist_info}{reg_info}{nt_info}")
 
         # Stagnation check for D reflection
         if ((ep + 1) % stagnation_window == 0
@@ -364,6 +450,40 @@ def run_stage(
                 result.episodes[:-stagnation_window], stagnation_window)
             if recent_sr <= prev_sr + 0.05:
                 event_d.reflect()
+
+        # Fast-fail: abort Stage 2 early if distiller not progressing
+        FAST_FAIL_EP = 10
+        FAST_FAIL_MIN_SAMPLES = 50
+        if (stage == 2 and ep == FAST_FAIL_EP - 1 and fast_fail):
+            distiller = getattr(kernel, '_online_distiller', None)
+            if distiller is not None:
+                failures = []
+                # 1. Enough samples collected?
+                if distiller.total_samples < FAST_FAIL_MIN_SAMPLES:
+                    failures.append(
+                        f"samples={distiller.total_samples} < "
+                        f"{FAST_FAIL_MIN_SAMPLES}")
+                # 2. Warm-start fired?
+                if distiller.train_count == 0:
+                    failures.append("train_count=0 (warm-start never fired)")
+                # 3. FRONTIER (dominant channel) at least APPRENTICE?
+                if (distiller.mode_for(TargetKind.FRONTIER)
+                        == DistillerMode.OFF):
+                    failures.append(
+                        "mode_frontier=OFF (no training signal)")
+                # 4. Frontier eval exists?
+                if (distiller.train_count > 0
+                        and distiller.n_eval_for(TargetKind.FRONTIER) == 0):
+                    failures.append(
+                        "frontier n_eval=0 (no frontier samples in eval)")
+                if failures:
+                    print(f"\n  >> FAST-FAIL at S2 ep{ep + 1}:")
+                    for f in failures:
+                        print(f"    X {f}")
+                    result.exit_reason = (
+                        f"FAST-FAIL at ep {ep + 1}: "
+                        + "; ".join(failures))
+                    break
 
         # Check exit criteria (size-adaptive thresholds)
         if len(result.episodes) >= window:
@@ -438,6 +558,9 @@ def run_grid_size(
     seed_base: int,
     global_ep_offset: int,
     verbose: bool = False,
+    trust_threshold: float = 0.35,
+    fast_fail: bool = False,
+    log_dir: Optional[Path] = None,
 ) -> Tuple[List[StageResult], int]:
     """Run all 3 Dreyfus stages for one grid size.
 
@@ -478,10 +601,20 @@ def run_grid_size(
         replay_max=2000,
         train_interval=3,
         min_samples=200,
+        min_targeted_for_enable=50,
+        warm_start_epochs=5,
+        train_interval_post_enable=2,
         min_accuracy_targeted=0.55,
+        min_accuracy_frontier=0.45,
         min_mean_confidence=0.45,
         confidence_threshold=0.55,
+        trust_threshold=trust_threshold,
+        ema_alpha=0.5,
     )
+
+    # DEF regime controller + telemetry (Phase 2: active overlay steering)
+    regime_ctrl = RegimeController(hold_ticks=3)
+    telemetry = Telemetry(log_dir=log_dir) if log_dir is not None else None
 
     kernel_s2 = MvpKernel(
         agent_a=DoorKeyAgentA(),
@@ -495,6 +628,9 @@ def run_grid_size(
         use_unified_memory=True,
         active_compression=True,
         online_distiller=distiller,
+        regime_controller=regime_ctrl,
+        telemetry=telemetry,
+        max_steps=max_steps,
     )
 
     # Size-adaptive replan-burst parameters
@@ -519,6 +655,7 @@ def run_grid_size(
         stage1_avg_steps=s1.avg_steps_successful,
         verbose=verbose,
         min_stage2_eps=min_s2_eps,
+        fast_fail=fast_fail,
     )
     stage_results.append(s2)
     ep_offset += len(s2.episodes)
@@ -533,6 +670,10 @@ def run_grid_size(
     )
     stage_results.append(s3)
     ep_offset += len(s3.episodes)
+
+    # Close telemetry file handle
+    if telemetry is not None:
+        telemetry.close()
 
     total = ep_offset - global_ep_offset
     return stage_results, total
@@ -659,10 +800,16 @@ def save_csv(
         "success", "steps", "reward",
         "pct_4fom", "pct_c_compressed", "mean_delta_8", "mean_loop_gain",
         "compression_events", "d_has_sequence",
-        "replan_burst_count", "distiller_samples",
+        "replan_burst_count", "distiller_samples", "distiller_replay",
         "distiller_accuracy", "distiller_acc_targeted", "distiller_acc_frontier",
         "distiller_mean_conf", "distiller_conf_targeted", "distiller_conf_frontier",
-        "distiller_enabled",
+        "distiller_mean_trust", "distiller_trust_targeted", "distiller_trust_frontier",
+        "distiller_enabled", "distiller_mode", "distiller_mode_real",
+        "distiller_mode_frontier",
+        "distiller_n_targeted", "distiller_n_targeted_eval",
+        "distiller_n_frontier", "distiller_n_frontier_eval",
+        "distiller_train_count", "no_target_ticks",
+        "regime",
     ]
 
     rows = []
@@ -685,13 +832,27 @@ def save_csv(
                     "d_has_sequence": ep.d_has_sequence,
                     "replan_burst_count": ep.replan_burst_count,
                     "distiller_samples": ep.distiller_samples,
+                    "distiller_replay": ep.distiller_replay,
                     "distiller_accuracy": ep.distiller_accuracy,
                     "distiller_acc_targeted": ep.distiller_acc_targeted,
                     "distiller_acc_frontier": ep.distiller_acc_frontier,
                     "distiller_mean_conf": ep.distiller_mean_conf,
                     "distiller_conf_targeted": ep.distiller_conf_targeted,
                     "distiller_conf_frontier": ep.distiller_conf_frontier,
+                    "distiller_mean_trust": ep.distiller_mean_trust,
+                    "distiller_trust_targeted": ep.distiller_trust_targeted,
+                    "distiller_trust_frontier": ep.distiller_trust_frontier,
                     "distiller_enabled": ep.distiller_enabled,
+                    "distiller_mode": ep.distiller_mode,
+                    "distiller_mode_real": ep.distiller_mode_real,
+                    "distiller_mode_frontier": ep.distiller_mode_frontier,
+                    "distiller_n_targeted": ep.distiller_n_targeted,
+                    "distiller_n_targeted_eval": ep.distiller_n_targeted_eval,
+                    "distiller_n_frontier": ep.distiller_n_frontier,
+                    "distiller_n_frontier_eval": ep.distiller_n_frontier_eval,
+                    "distiller_train_count": ep.distiller_train_count,
+                    "no_target_ticks": ep.no_target_ticks,
+                    "regime": ep.regime,
                 })
 
     with open(path, "w", newline="") as f:
@@ -711,6 +872,8 @@ def run_seed_sanity(
     n_seeds: int,
     size: int = 16,
     max_per_stage: int = 80,
+    trust_threshold: float = 0.35,
+    base_seed: int = 42,
 ) -> None:
     """Run the curriculum over multiple seeds, report Stage3 SR mean±std.
 
@@ -723,11 +886,13 @@ def run_seed_sanity(
     import math
 
     max_steps = {6: 200, 8: 300, 16: 600}.get(size, 600)
-    seeds = [42 + i * 1000 for i in range(n_seeds)]
+    seeds = [base_seed + i * 1000 for i in range(n_seeds)]
 
     print(f"\n{'#'*60}")
     print(f"  SEED-SANITY: {size}x{size} over {n_seeds} seeds")
     print(f"  Max per stage: {max_per_stage}")
+    print(f"  Trust threshold: tau={trust_threshold:.2f}")
+    print(f"  Base seed: {seeds[0]}")
     print(f"{'#'*60}")
 
     stage3_srs: List[float] = []
@@ -749,60 +914,104 @@ def run_seed_sanity(
             seed_base=seed,
             global_ep_offset=0,
             verbose=False,
+            trust_threshold=trust_threshold,
         )
 
         # Extract Stage 2 metrics
         s2 = stage_results[1] if len(stage_results) >= 2 else None
         stage2_eps = len(s2.episodes) if s2 else 0
-        # When did the net turn ON in Stage 2? (first episode with enabled=True)
-        net_on_ep_s2 = -1
+        # When did the mode first reach EXPERT in Stage 2?
+        expert_ep_s2 = -1
         s2_end_acc_t = 0.0
         s2_end_conf_t = 0.0
+        s2_end_trust_t = 0.0
+        s2_end_mode = "OFF"
+        s2_end_mode_r = "OFF"
+        s2_end_mode_f = "OFF"
         if s2 and s2.episodes:
             for e in s2.episodes:
-                if e.distiller_enabled and net_on_ep_s2 < 0:
-                    net_on_ep_s2 = e.stage_episode
+                if e.distiller_mode == "EXPERT" and expert_ep_s2 < 0:
+                    expert_ep_s2 = e.stage_episode
             s2_end_acc_t = s2.episodes[-1].distiller_acc_targeted
             s2_end_conf_t = s2.episodes[-1].distiller_conf_targeted
+            s2_end_trust_t = s2.episodes[-1].distiller_trust_targeted
+            s2_end_mode = s2.episodes[-1].distiller_mode
+            s2_end_mode_r = s2.episodes[-1].distiller_mode_real
+            s2_end_mode_f = s2.episodes[-1].distiller_mode_frontier
 
         # Extract Stage 3 metrics
         s3 = stage_results[2] if len(stage_results) >= 3 else None
         if s3 and s3.episodes:
             successes = sum(1 for e in s3.episodes if e.success)
             sr = successes / len(s3.episodes)
-            net_on = any(e.distiller_enabled for e in s3.episodes)
+            s3_end_mode = s3.episodes[-1].distiller_mode
+            s3_end_mode_r = s3.episodes[-1].distiller_mode_real
+            s3_end_mode_f = s3.episodes[-1].distiller_mode_frontier
             last_acc_t = s3.episodes[-1].distiller_acc_targeted
             last_acc_f = s3.episodes[-1].distiller_acc_frontier
             last_conf_t = s3.episodes[-1].distiller_conf_targeted
+            last_trust_t = s3.episodes[-1].distiller_trust_targeted
             # Timeouts: episodes where agent hit max_steps
             timeouts_s3 = sum(1 for e in s3.episodes if e.steps >= max_steps)
             # Mean B-takeover in Stage 3
             b_takeover_s3 = (sum(e.pct_c_compressed for e in s3.episodes)
                              / len(s3.episodes))
+            # Trust crossing: first episode where tt_targeted >= tau
+            first_tt_cross_s3 = -1
+            for e in s3.episodes:
+                if e.distiller_trust_targeted >= trust_threshold and first_tt_cross_s3 < 0:
+                    first_tt_cross_s3 = e.stage_episode
+                    break
+            # B% before and after crossing
+            b_pct_before_cross = 0.0
+            b_pct_after_cross = 0.0
+            if first_tt_cross_s3 >= 0:
+                pre = [e for e in s3.episodes if e.stage_episode < first_tt_cross_s3]
+                post = [e for e in s3.episodes if e.stage_episode >= first_tt_cross_s3]
+                if pre:
+                    b_pct_before_cross = sum(e.pct_c_compressed for e in pre) / len(pre)
+                if post:
+                    b_pct_after_cross = sum(e.pct_c_compressed for e in post) / len(post)
         else:
             sr = 0.0
-            net_on = False
+            s3_end_mode = "OFF"
+            s3_end_mode_r = "OFF"
+            s3_end_mode_f = "OFF"
             last_acc_t = 0.0
             last_acc_f = 0.0
             last_conf_t = 0.0
+            last_trust_t = 0.0
             timeouts_s3 = 0
             b_takeover_s3 = 0.0
+            first_tt_cross_s3 = -1
+            b_pct_before_cross = 0.0
+            b_pct_after_cross = 0.0
 
         stage3_srs.append(sr)
-        stage3_net_on.append(net_on)
+        stage3_net_on.append(s3_end_mode == "EXPERT")
         per_seed_info.append({
             "seed": seed,
             "sr": sr,
-            "net_on": net_on,
+            "s3_mode": s3_end_mode,
+            "s3_mode_r": s3_end_mode_r,
+            "s3_mode_f": s3_end_mode_f,
             "n_eps_s3": len(s3.episodes) if s3 else 0,
             "stage2_eps": stage2_eps,
-            "net_on_ep_s2": net_on_ep_s2,
+            "expert_ep_s2": expert_ep_s2,
+            "s2_mode": s2_end_mode,
+            "s2_mode_r": s2_end_mode_r,
+            "s2_mode_f": s2_end_mode_f,
             "timeouts_s3": timeouts_s3,
             "b_takeover_s3": b_takeover_s3,
+            "first_tt_cross_s3": first_tt_cross_s3,
+            "b_pct_before_cross": b_pct_before_cross,
+            "b_pct_after_cross": b_pct_after_cross,
             "s2_end_acc_t": s2_end_acc_t,
             "s2_end_conf_t": s2_end_conf_t,
+            "s2_end_trust_t": s2_end_trust_t,
             "s3_end_acc_t": last_acc_t,
             "s3_end_conf_t": last_conf_t,
+            "s3_end_trust_t": last_trust_t,
             "acc_f": last_acc_f,
         })
 
@@ -817,46 +1026,66 @@ def run_seed_sanity(
 
     # Print detailed summary
     print(f"\n{'='*60}")
-    print(f"  SEED-SANITY RESULTS: {size}x{size}")
+    print(f"  SEED-SANITY RESULTS: {size}x{size}  (tau={trust_threshold:.2f})")
     print(f"{'='*60}")
 
     # Header row
-    print(f"\n  {'Seed':>6s}  {'SR':>5s}  {'net':>3s}  {'s2ep':>4s}  "
-          f"{'netOn':>5s}  {'tout':>4s}  {'B%s3':>5s}  "
-          f"{'at_s2':>5s}  {'ct_s2':>5s}  {'at_s3':>5s}  {'ct_s3':>5s}")
-    print(f"  {'-'*6}  {'-'*5}  {'-'*3}  {'-'*4}  "
-          f"{'-'*5}  {'-'*4}  {'-'*5}  "
-          f"{'-'*5}  {'-'*5}  {'-'*5}  {'-'*5}")
+    print(f"\n  {'Seed':>6s}  {'SR':>5s}  {'mode':>3s}  {'R':>1s}{'F':>1s}  "
+          f"{'s2ep':>4s}  {'exp@':>5s}  {'tout':>4s}  {'B%s3':>5s}  "
+          f"{'cross':>5s}  {'B%<':>4s}  {'B%>':>4s}  "
+          f"{'at_s2':>5s}  {'tt_s2':>5s}  "
+          f"{'at_s3':>5s}  {'tt_s3':>5s}")
+    print(f"  {'-'*6}  {'-'*5}  {'-'*3}  {'-'*2}  "
+          f"{'-'*4}  {'-'*5}  {'-'*4}  {'-'*5}  "
+          f"{'-'*5}  {'-'*4}  {'-'*4}  "
+          f"{'-'*5}  {'-'*5}  "
+          f"{'-'*5}  {'-'*5}")
     for info in per_seed_info:
-        net_str = "ON" if info["net_on"] else "OFF"
-        net_ep_str = (f"{info['net_on_ep_s2']:>5d}"
-                      if info["net_on_ep_s2"] >= 0 else "  n/a")
-        print(f"  {info['seed']:>6d}  {info['sr']:>4.0%}  {net_str:>3s}  "
-              f"{info['stage2_eps']:>4d}  {net_ep_str}  "
+        mode_str = info["s3_mode"][:3]  # OFF/APP/EXP
+        mr = info["s3_mode_r"][0]  # O/A/E
+        mf = info["s3_mode_f"][0]  # O/A/E
+        exp_ep_str = (f"{info['expert_ep_s2']:>5d}"
+                      if info["expert_ep_s2"] >= 0 else "  n/a")
+        cross_str = (f"{info['first_tt_cross_s3']:>5d}"
+                     if info["first_tt_cross_s3"] >= 0 else "    -")
+        blt_str = (f"{info['b_pct_before_cross']:>3.0%}"
+                   if info["first_tt_cross_s3"] >= 0 else "   -")
+        bgt_str = (f"{info['b_pct_after_cross']:>3.0%}"
+                   if info["first_tt_cross_s3"] >= 0 else "   -")
+        print(f"  {info['seed']:>6d}  {info['sr']:>4.0%}  {mode_str:>3s}  "
+              f"{mr}{mf}  "
+              f"{info['stage2_eps']:>4d}  {exp_ep_str}  "
               f"{info['timeouts_s3']:>4d}  {info['b_takeover_s3']:>4.0%}  "
-              f"{info['s2_end_acc_t']:>4.0%}  {info['s2_end_conf_t']:>4.0%}  "
-              f"{info['s3_end_acc_t']:>4.0%}  {info['s3_end_conf_t']:>4.0%}")
+              f"{cross_str}  {blt_str}  {bgt_str}  "
+              f"{info['s2_end_acc_t']:>4.0%}  "
+              f"{info['s2_end_trust_t']:>4.0%}  "
+              f"{info['s3_end_acc_t']:>4.0%}  "
+              f"{info['s3_end_trust_t']:>4.0%}")
 
-    print(f"\n  Stage3 SR: {mean_sr:.0%} ± {std_sr:.0%}  "
+    print(f"\n  Stage3 SR: {mean_sr:.0%} +/- {std_sr:.0%}  "
           f"(min={min_sr:.0%}, max={max_sr:.0%})")
-    print(f"  Net enabled: {sum(stage3_net_on)}/{n_seeds} seeds")
+    print(f"  Trust threshold: tau={trust_threshold:.2f}")
+    print(f"  EXPERT reached: {sum(stage3_net_on)}/{n_seeds} seeds")
     print(f"  Total time: {elapsed:.0f}s ({elapsed/n_seeds:.0f}s/seed)")
 
-    # Expected-signature analysis for Tweak C
-    print(f"\n  Expected Tweak-C signature:")
+    # Mode-progression analysis
+    print(f"\n  Mode-progression per seed:")
     for info in per_seed_info:
-        net_ep = info["net_on_ep_s2"]
+        exp_ep = info["expert_ep_s2"]
         marker = ""
         if info["stage2_eps"] >= 60:
             marker += " [s2>=60]"
-        if not info["net_on"]:
-            marker += " [NET OFF: sample quality issue?]"
-        elif net_ep >= 0 and net_ep <= 20:
-            marker += " [early enable]"
-        elif net_ep >= 0:
-            marker += f" [late enable @{net_ep}]"
+        if info["s3_mode"] == "OFF":
+            marker += " [OFF: no training signal]"
+        elif info["s3_mode"] == "APPRENTICE":
+            marker += " [APR: readiness not met]"
+        elif exp_ep >= 0 and exp_ep <= 20:
+            marker += " [early EXPERT]"
+        elif exp_ep >= 0:
+            marker += f" [EXPERT @{exp_ep}]"
         print(f"    Seed {info['seed']}: s2={info['stage2_eps']}eps, "
-              f"netOn@{net_ep}, SR={info['sr']:.0%}{marker}")
+              f"mode=R={info['s2_mode_r'][0]}/F={info['s2_mode_f'][0]}, "
+              f"SR={info['sr']:.0%}{marker}")
     print()
 
 
@@ -875,8 +1104,14 @@ def main() -> bool:
                         help="Base seed (default: 42)")
     parser.add_argument("--seed-sanity", type=int, default=0, metavar="N",
                         help="Run 16x16 over N seeds, report Stage3 SR mean±std")
+    parser.add_argument("--trust-threshold", type=float, default=0.35,
+                        help="Trust gate threshold for B-takeover (default: 0.35)")
+    parser.add_argument("--fast-fail", action="store_true",
+                        help="Abort Stage 2 after 10 eps if distiller not progressing")
     parser.add_argument("--verbose", action="store_true",
                         help="Print every episode")
+    parser.add_argument("--log-dir", type=str, default=None,
+                        help="Directory for JSONL telemetry log (default: None)")
     args = parser.parse_args()
 
     # Seed-sanity mode: quick multi-seed regression check
@@ -885,6 +1120,8 @@ def main() -> bool:
             n_seeds=args.seed_sanity,
             size=16,
             max_per_stage=args.max_per_stage,
+            trust_threshold=args.trust_threshold,
+            base_seed=args.seed,
         )
         return True
 
@@ -902,6 +1139,7 @@ def main() -> bool:
     print(f"  Sizes: {sizes}")
     print(f"  Max per stage: {args.max_per_stage}")
     print(f"  Seed: {args.seed}")
+    print(f"  Trust threshold: tau={args.trust_threshold:.2f}")
 
     t0 = time.time()
     all_results: Dict[int, List[StageResult]] = {}
@@ -912,6 +1150,8 @@ def main() -> bool:
 
     for size in sizes:
         ms = max_steps_map.get(size, args.max_steps)
+        _log_dir = (Path(args.log_dir) / f"grid{size}"
+                    if args.log_dir is not None else None)
         stage_results, n_eps = run_grid_size(
             size=size,
             event_d=event_d,
@@ -920,6 +1160,9 @@ def main() -> bool:
             seed_base=args.seed,
             global_ep_offset=global_ep,
             verbose=args.verbose,
+            trust_threshold=args.trust_threshold,
+            fast_fail=args.fast_fail,
+            log_dir=_log_dir,
         )
         all_results[size] = stage_results
         global_ep += n_eps

@@ -140,6 +140,48 @@ class StreamD(ABC):
         """Build a micro-narrative from the last *last_n* events."""
         ...
 
+    def report_meaning(self) -> "MeaningReport":
+        """Structured MeaningReport for kernel consumption (Phase 3).
+
+        Default adapter: derives MeaningReport from build_micro() ZD.
+        Tag-parsing lives here (inside D abstraction), NOT in the kernel.
+        D agents with native report_meaning() override this for richer
+        structured data.  The default ensures all existing D agents work
+        without modification.
+        """
+        from kernel.types import MeaningReport
+        try:
+            zd = self.build_micro(
+                goal_mode="seek", goal_pos=(-1, -1), last_n=5)
+        except Exception:
+            return MeaningReport()
+
+        # Auto-extract suggested_target and phase from tags
+        suggested_target = None
+        suggested_phase = None
+        for tag in zd.meaning_tags:
+            tl = tag.strip().lower()
+            if tl.startswith(("key_at:", "door_at:", "goal_at:")):
+                parts = tl.split(":", 1)[1].split("_")
+                try:
+                    suggested_target = (int(parts[0]), int(parts[1]))
+                except (ValueError, IndexError):
+                    pass
+            elif tl.startswith("phase:"):
+                suggested_phase = tl.split(":", 1)[1]
+
+        return MeaningReport(
+            confidence=0.5 if len(zd.meaning_tags) > 1 else 0.0,
+            suggested_target=suggested_target,
+            suggested_phase=suggested_phase,
+            events_detected=[],
+            narrative_tags=list(zd.meaning_tags),
+            grounding_violations=zd.grounding_violations,
+            grounding_score=max(
+                0.0, 1.0 - zd.grounding_violations * 0.1),
+            narrative_length=zd.length_chars,
+        )
+
 
 # ---------------------------------------------------------------------------
 # Environment adapter (eval-script infrastructure, NOT used by kernel)

@@ -76,6 +76,7 @@ class MvpLoopGainTracker:
         predict_next_fn=None,        # B.predict_next (for g_BA walkability)
         d_seen_positions: Optional[set] = None,  # D's seen_positions (for g_AD)
         has_agent_d: bool = True,    # Whether D agent exists (False → no D→C path)
+        meaning_report=None,         # Phase 3: MeaningReport (no tag parsing)
     ) -> MvpLoopGain:
         """Compute all four gains for this tick."""
 
@@ -97,7 +98,8 @@ class MvpLoopGainTracker:
         # --- g_DC: when D is running ---
         fresh_g_DC = None
         if gD == 1 and zD is not None:
-            fresh_g_DC = self._compute_g_DC(zC, zD, decon_fired)
+            fresh_g_DC = self._compute_g_DC(
+                zC, zD, decon_fired, meaning_report=meaning_report)
         elif has_agent_d and "target" in zC.memory:
             # Target in memory (possibly via hint-capture path) — D→C coupling realized
             fresh_g_DC = 1.0
@@ -115,6 +117,7 @@ class MvpLoopGainTracker:
         if gD == 1 and zD is not None:
             fresh_g_AD = self._compute_g_AD(
                 zA, zD, zC, d_seen_positions=d_seen_positions,
+                meaning_report=meaning_report,
             )
         if fresh_g_AD is not None:
             self.g_AD = fresh_g_AD
@@ -225,33 +228,31 @@ class MvpLoopGainTracker:
         # Map [-1, 1] -> [0, 1]
         return (cosine + 1.0) / 2.0
 
-    def _compute_g_DC(self, zC, zD, decon_fired: bool) -> Optional[float]:
+    def _compute_g_DC(
+        self, zC, zD, decon_fired: bool, meaning_report=None,
+    ) -> Optional[float]:
         """Salience-to-Valence: How much does D influence C?
 
+        Phase 3: Uses MeaningReport fields instead of tag parsing.
         Staged scoring:
         - 1.0: target found in C's memory (D contributed actionable info)
-        - 0.8: deconstruction fired (D->C pipeline active) OR candidates narrowing
-        - 0.5: D produced tags but no structural change yet
+        - 0.8: decon fired OR MeaningReport has suggested_target
+        - 0.5: D produced events but no structural change yet
         - 0.3: D produced nothing useful
         """
         if zD is None:
             return None
 
-        tags = list(zD.meaning_tags)
         target_in_memory = "target" in zC.memory
 
-        # Check if D's synthesis narrowed candidates (from tags)
-        has_target_tag = any(t.startswith("target:") for t in tags)
-        candidates_narrowing = any(t.startswith("candidates:") for t in tags)
-
         if target_in_memory:
-            # Target identified — D→C coupling is fully realized
             return 1.0
-        elif decon_fired or has_target_tag:
+        elif decon_fired or (
+                meaning_report is not None
+                and meaning_report.suggested_target is not None):
             return 0.8
-        elif candidates_narrowing and len(tags) > 2:
-            return 0.6
-        elif len(tags) > 1:  # More than just "empty"
+        elif (meaning_report is not None
+              and len(meaning_report.events_detected) > 0):
             return 0.5
         else:
             return 0.3
@@ -262,19 +263,12 @@ class MvpLoopGainTracker:
         zD,
         zC,
         d_seen_positions: Optional[set] = None,
+        meaning_report=None,
     ) -> Optional[float]:
         """Narrative-World-Resonance: grounding validation.
 
-        For deterministic D: always 1.0 (narrative is constructed from observed data).
-        For LLM-based D: concrete grounding checks with weighted violations.
-
-        Grounding checks (LLM D):
-        | Check               | Violation when...                              | Weight |
-        |--------------------|-------------------------------------------------|--------|
-        | Hint-Konsistenz     | D claims hint but zA.hint disagrees             | 1.0    |
-        | Position-Konsistenz | D mentions position not in seen_positions       | 0.5    |
-        | Goal-Mode-Konsistenz| D's tags contradict zC.goal_mode                | 0.5    |
-        | Halluzinierte Tags  | D produces tags not matching known patterns     | 0.25   |
+        Phase 3: Uses MeaningReport.grounding_score for LLM D instead
+        of parsing tags.  Deterministic D still always returns 1.0.
         """
         if zD is None:
             return None
@@ -283,55 +277,12 @@ class MvpLoopGainTracker:
         if zD.grounding_violations == 0 and not self._has_llm_markers(zD):
             return 1.0
 
-        # LLM-based D: concrete grounding checks
-        total_weight = 0.0
-        violation_weight = 0.0
+        # LLM D: use MeaningReport's pre-computed grounding_score
+        if meaning_report is not None:
+            return max(0.0, meaning_report.grounding_score)
 
-        tags = set(t.strip().lower() for t in zD.meaning_tags)
-
-        # (1) Hint-Konsistenz (weight 1.0)
-        total_weight += 1.0
-        hint_tags = [t for t in tags if t.startswith("hint:")]
-        if hint_tags:
-            for ht in hint_tags:
-                claimed_hint = ht.split(":", 1)[1].upper()
-                if zA.hint is not None:
-                    if claimed_hint != zA.hint:
-                        violation_weight += 1.0
-                        break
-                # No violation if zA.hint is None — D may be recalling from buffer
-
-        # (2) Position-Konsistenz (weight 0.5)
-        if d_seen_positions is not None:
-            total_weight += 0.5
-            # Check if narrative mentions positions not in seen set
-            # Simple heuristic: check if D claims positions via narrative text
-            # (Full NLP parsing would be overkill; we check the tag-based system)
-            # For MVP: no violation possible from tags alone, only from narrative
-            # → skip this check for now (would need NLP on narrative text)
-
-        # (3) Goal-Mode-Konsistenz (weight 0.5)
-        total_weight += 0.5
-        goal_mode_tags = [t for t in tags if t.startswith("goal:")]
-        for gmt in goal_mode_tags:
-            claimed_mode = gmt.split(":", 1)[1]
-            if claimed_mode != zC.goal_mode:
-                violation_weight += 0.5
-                break
-
-        # (4) Halluzinierte Tags (weight 0.25)
-        total_weight += 0.25
-        unknown_tags = []
-        for tag in tags:
-            if not any(tag.startswith(p) for p in KNOWN_TAG_PREFIXES):
-                unknown_tags.append(tag)
-        if unknown_tags:
-            violation_weight += 0.25
-
-        if total_weight == 0:
-            return 1.0
-
-        return max(0.0, 1.0 - violation_weight / total_weight)
+        # Fallback: no MeaningReport available (should not happen after Phase 3)
+        return 1.0
 
     # ------------------------------------------------------------------
     # Helpers

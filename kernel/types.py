@@ -152,6 +152,28 @@ class ResidualSnapshot:
 
 
 @dataclass
+class MeaningReport:
+    """Structured D-stream output for kernel consumption.
+
+    D reports WHAT it observes (confidence, suggested target, events).
+    The kernel decides WHAT TO DO (regime, gating, target selection).
+
+    This decouples D's implementation from kernel steering logic.
+    New D implementations only need to produce a MeaningReport.
+    """
+    confidence: float = 0.0                                # D's self-assessment [0,1]
+    suggested_target: Optional[Tuple[int, int]] = None     # D's navigation suggestion
+    suggested_phase: Optional[str] = None                  # "find_key" / "open_door" / "reach_goal"
+    events_detected: List[str] = field(default_factory=list)  # ["KEY_PICKED_UP", ...]
+    hypothesis_strength: float = 0.0                       # Strength of current hypothesis [0,1]
+    narrative_tags: List[str] = field(default_factory=list) # Raw tags for backward compat
+    # Phase 3: Kernel-facing fields (no tag parsing needed)
+    grounding_violations: int = 0                          # D's self-reported violations
+    grounding_score: float = 1.0                           # 1.0=grounded, 0.0=hallucinating
+    narrative_length: int = 0                              # For L3 summary storage
+
+
+@dataclass
 class MvpTickResult:
     """Result of a single MvpKernel.tick() call."""
     action: str
@@ -165,3 +187,4 @@ class MvpTickResult:
     c_compressed: bool = False     # C ran in compressed mode (L2 compressed)
     d_suppressed: bool = False     # D skipped due to L3 compression
     replan_burst_active: bool = False  # This tick was a replan-burst tick (C forced)
+    regime: Optional[str] = None  # Active DEF regime name (Phase 2: overlay steering)
