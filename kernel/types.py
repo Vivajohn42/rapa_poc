@@ -7,6 +7,7 @@ between the MvpKernel orchestrator and the existing agents/router.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum, auto
 from typing import List, Optional, Dict, Any, Tuple
 
 
@@ -188,3 +189,59 @@ class MvpTickResult:
     d_suppressed: bool = False     # D skipped due to L3 compression
     replan_burst_active: bool = False  # This tick was a replan-burst tick (C forced)
     regime: Optional[str] = None  # Active DEF regime name (Phase 2: overlay steering)
+
+
+# ======================================================================
+# Phase 4: StreamLearner types
+# ======================================================================
+
+class LearnerMode(Enum):
+    """Learning readiness of a stream.
+
+    OFF:      Deterministic / no learning (default adapters)
+    TRAINING: Learning active, not yet reliable
+    READY:    Learning converged, stream is trustworthy
+    """
+    OFF = auto()
+    TRAINING = auto()
+    READY = auto()
+
+
+@dataclass
+class LearnerStatus:
+    """Stream's self-reported learning status.
+
+    Streams report WHAT they learned. The kernel decides WHAT TO DO
+    (regime gating, compression eligibility).
+    """
+    mode: LearnerMode = LearnerMode.OFF
+    accuracy: float = 0.0       # Self-reported accuracy [0,1]
+    episodes_trained: int = 0   # Total training episodes
+    label: str = ""             # Human-readable status (e.g. "BFS-deterministic")
+
+
+@dataclass
+class LearnerSignal:
+    """Per-tick learning signal constructed by the kernel.
+
+    Universal fields (every stream can use):
+      tick, reward, done, episode_step
+
+    Stream-relevant fields (each learner reads what it needs):
+      delta_4         — B's prediction error (relevant for A, B)
+      c_term          — C's valence-reference alignment (relevant for C)
+      d_term          — D's meaning-structure alignment (relevant for D)
+      action          — selected action this tick (relevant for B, C)
+      scored          — C's scored action list (relevant for C)
+      grounding_score — D's grounding (relevant for D)
+    """
+    tick: int = 0
+    reward: float = 0.0
+    done: bool = False
+    episode_step: int = 0
+    delta_4: float = 0.0
+    c_term: float = 0.0
+    d_term: float = 0.0
+    action: str = ""
+    scored: Optional[List] = None
+    grounding_score: float = 1.0

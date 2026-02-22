@@ -215,6 +215,7 @@ def compute_triggers(
     stuck_ticks: int = 0,
     max_steps: int = 200,
     current_step: int = 0,
+    learner_readiness: float = 1.0,   # Phase 4: min readiness across all stream learners
 ) -> TriggerSignals:
     """Compute abstract trigger signals from kernel observables.
 
@@ -261,6 +262,8 @@ def compute_triggers(
     if l2_compressed:
         readiness += 0.2
     readiness += min(0.1, distiller_accuracy * 0.1)
+    # Phase 4: learner readiness as lower bound (weakest-link principle)
+    readiness = min(readiness, learner_readiness)
     readiness = min(1.0, readiness)
 
     # ---- Budget ----

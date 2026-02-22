@@ -231,6 +231,12 @@ class MvpKernel:
         if self._telemetry is not None:
             self._telemetry.metrics.reset_episode()
 
+        # Phase 4: Reset StreamLearner episode state
+        for _agent in (self.agent_a, self.agent_b,
+                       self.agent_c, self.agent_d):
+            if _agent is not None:
+                _agent.learner.reset_episode()
+
         # Per-episode success rate tracking (for trigger signals)
         self._episode_step: int = 0
         self._episode_stuck_ticks: int = 0
@@ -360,6 +366,17 @@ class MvpKernel:
                     getattr(_om, "known_walls", set()))
                 _new_cells_ratio = min(1.0, _known / _total)
 
+            # Phase 4: learner readiness (weakest-link across all streams)
+            from kernel.types import LearnerMode
+            _learner_readiness = 1.0
+            for _agent in (self.agent_a, self.agent_b,
+                           self.agent_c, self.agent_d):
+                if _agent is not None:
+                    _lstatus = _agent.learner.ready()
+                    if _lstatus.mode == LearnerMode.TRAINING:
+                        _learner_readiness = min(
+                            _learner_readiness, 0.3)
+
             triggers = compute_triggers(
                 td_err=signals.td_err,
                 delta_8=_delta_8,
@@ -374,6 +391,7 @@ class MvpKernel:
                 stuck_ticks=self._episode_stuck_ticks,
                 max_steps=self.max_steps,
                 current_step=t,
+                learner_readiness=_learner_readiness,
             )
             shadow_regime = self._regime_controller.update(
                 triggers, episode_end=done)
@@ -738,6 +756,36 @@ class MvpKernel:
                 self._zC = zC_updated
                 zC = zC_updated
                 decon_fired = True  # Legacy-compatible
+
+        # ---- 14. StreamLearner signals (Phase 4) ----
+        if residual is not None or gain is not None:
+            from kernel.types import LearnerSignal
+            _signal = LearnerSignal(
+                tick=t,
+                reward=(self._reward_history[-1]
+                        if self._reward_history else 0.0),
+                done=done,
+                episode_step=self._episode_step,
+                delta_4=residual.delta_4 if residual else 0.0,
+                c_term=residual.c_term if residual else 0.0,
+                d_term=residual.d_term if residual else 0.0,
+                action=action,
+                scored=scored,
+                grounding_score=(
+                    _tick_report.grounding_score
+                    if _tick_report is not None else 1.0),
+            )
+            for _agent in (self.agent_a, self.agent_b,
+                           self.agent_c, self.agent_d):
+                if _agent is not None:
+                    _agent.learner.observe_signal(_signal)
+
+        # ---- 14b. Episode-end learning ----
+        if done:
+            for _agent in (self.agent_a, self.agent_b,
+                           self.agent_c, self.agent_d):
+                if _agent is not None:
+                    _agent.learner.learn()
 
         return MvpTickResult(
             action=action,

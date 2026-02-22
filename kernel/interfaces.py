@@ -60,6 +60,13 @@ class StreamA(ABC):
         """
         ...
 
+    @property
+    def learner(self) -> "StreamLearner":
+        """Learning interface (Phase 4). Default: NullLearner."""
+        if not hasattr(self, "_learner"):
+            self._learner = NullLearner(label="deterministic-A")
+        return self._learner
+
 
 class StreamB(ABC):
     """Dynamics / forward model stream: predict next state given action."""
@@ -72,6 +79,13 @@ class StreamB(ABC):
         loop gain and closure residuum computations are stable.
         """
         ...
+
+    @property
+    def learner(self) -> "StreamLearner":
+        """Learning interface (Phase 4). Default: NullLearner."""
+        if not hasattr(self, "_learner"):
+            self._learner = NullLearner(label="deterministic-B")
+        return self._learner
 
 
 class StreamC(ABC):
@@ -102,6 +116,13 @@ class StreamC(ABC):
         protocol (i.e. has a ``target`` property with getter and setter).
         """
         ...
+
+    @property
+    def learner(self) -> "StreamLearner":
+        """Learning interface (Phase 4). Default: NullLearner."""
+        if not hasattr(self, "_learner"):
+            self._learner = NullLearner(label="deterministic-C")
+        return self._learner
 
 
 class StreamD(ABC):
@@ -139,6 +160,13 @@ class StreamD(ABC):
     ) -> ZD:
         """Build a micro-narrative from the last *last_n* events."""
         ...
+
+    @property
+    def learner(self) -> "StreamLearner":
+        """Learning interface (Phase 4). Default: NullLearner."""
+        if not hasattr(self, "_learner"):
+            self._learner = NullLearner(label="deterministic-D")
+        return self._learner
 
     def report_meaning(self) -> "MeaningReport":
         """Structured MeaningReport for kernel consumption (Phase 3).
@@ -181,6 +209,85 @@ class StreamD(ABC):
                 0.0, 1.0 - zd.grounding_violations * 0.1),
             narrative_length=zd.length_chars,
         )
+
+
+# ---------------------------------------------------------------------------
+# StreamLearner ABC (Phase 4: learning abstraction for all streams)
+# ---------------------------------------------------------------------------
+
+class StreamLearner(ABC):
+    """Abstract learning interface for any RAPA stream.
+
+    Streams report WHAT they learned (status). The kernel decides
+    WHAT TO DO (regime gating, compression eligibility).
+
+    Lifecycle per episode:
+      1. observe_signal() called every tick (data accumulation)
+      2. learn() called at episode end (training step)
+      3. ready() queried for regime/gating decisions
+
+    Phase 4: Interface only. Existing agents use NullLearner (default).
+    Phase 5: Plug in real implementations (VAE, Dreamer, SAC, etc.)
+    """
+
+    @abstractmethod
+    def observe_signal(self, signal: "LearnerSignal") -> None:
+        """Receive per-tick learning signal from kernel.
+
+        Called after loop gain and closure residuum are computed,
+        so all kernel observables are available in the signal.
+        """
+        ...
+
+    @abstractmethod
+    def learn(self) -> None:
+        """Perform one learning step.
+
+        Called at episode boundaries (done=True). The learner decides
+        internally whether to actually train (enough data, cooldown, etc.).
+        """
+        ...
+
+    @abstractmethod
+    def ready(self) -> "LearnerStatus":
+        """Report current learning readiness.
+
+        The kernel uses this for regime gating: streams in TRAINING
+        mode prevent GOALSEEK activation (weakest-link principle).
+        """
+        ...
+
+    def reset_episode(self) -> None:
+        """Reset per-episode learning state. Default: no-op."""
+        pass
+
+
+class NullLearner(StreamLearner):
+    """Default adapter: deterministic agent, always ready.
+
+    All existing agents use this via the .learner property on their
+    Stream ABC. Phase 5 replaces NullLearner with real implementations.
+    """
+
+    def __init__(self, label: str = "deterministic"):
+        self._label = label
+
+    def observe_signal(self, signal: "LearnerSignal") -> None:
+        pass  # Deterministic agents don't accumulate data
+
+    def learn(self) -> None:
+        pass  # Nothing to learn
+
+    def ready(self) -> "LearnerStatus":
+        from kernel.types import LearnerStatus, LearnerMode
+        return LearnerStatus(
+            mode=LearnerMode.OFF,
+            accuracy=1.0,
+            label=self._label,
+        )
+
+    def reset_episode(self) -> None:
+        pass
 
 
 # ---------------------------------------------------------------------------
