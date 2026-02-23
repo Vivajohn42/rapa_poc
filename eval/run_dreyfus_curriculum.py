@@ -116,6 +116,10 @@ class EpisodeMetrics:
     sac_c_mode: str = "OFF"           # learner mode: OFF/TRAINING/READY
     sac_c_accuracy: float = 0.0       # action agreement with deterministic C
     sac_c_episodes_trained: int = 0   # episodes trained so far
+    # Meta-Controller D metrics (Phase 5c)
+    meta_d_mode: str = "OFF"          # learner mode: OFF/TRAINING/READY
+    meta_d_accuracy: float = 0.0      # combined phase+confidence agreement
+    meta_d_episodes_trained: int = 0  # episodes trained so far
 
 
 @dataclass
@@ -188,6 +192,7 @@ def run_episode(
     global_ep: int,
     stage_ep: int,
     sac_agent_c=None,
+    meta_agent_d=None,
 ) -> EpisodeMetrics:
     """Run a single DoorKey episode, collecting governance metrics."""
     env = DoorKeyEnv(size=size, seed=seed)
@@ -371,6 +376,12 @@ def run_episode(
                          if sac_agent_c is not None else 0.0),
         sac_c_episodes_trained=(sac_agent_c.learner.ready().episodes_trained
                                  if sac_agent_c is not None else 0),
+        meta_d_mode=(meta_agent_d.learner.ready().mode.name
+                      if meta_agent_d is not None else "OFF"),
+        meta_d_accuracy=(meta_agent_d.learner.ready().accuracy
+                          if meta_agent_d is not None else 0.0),
+        meta_d_episodes_trained=(meta_agent_d.learner.ready().episodes_trained
+                                  if meta_agent_d is not None else 0),
     )
 
 
@@ -393,6 +404,7 @@ def run_stage(
     min_stage2_eps: int = 0,
     fast_fail: bool = False,
     sac_agent_c=None,
+    meta_agent_d=None,
 ) -> StageResult:
     """Run one Dreyfus stage, checking exit criteria each episode.
 
@@ -424,6 +436,7 @@ def run_stage(
             global_ep=global_ep,
             stage_ep=ep,
             sac_agent_c=sac_agent_c,
+            meta_agent_d=meta_agent_d,
         )
         result.episodes.append(metrics)
 
@@ -466,10 +479,16 @@ def run_stage(
                 sac_info = (f"  SAC={metrics.sac_c_mode[:3]}"
                             f"(acc={metrics.sac_c_accuracy:.0%}"
                             f",ep={metrics.sac_c_episodes_trained})")
+            meta_info = ""
+            if metrics.meta_d_mode != "OFF":
+                meta_info = (f"  META={metrics.meta_d_mode[:3]}"
+                             f"(acc={metrics.meta_d_accuracy:.0%}"
+                             f",ep={metrics.meta_d_episodes_trained})")
             print(f"  ep {ep:3d}: {status:4s}  steps={metrics.steps:3d}  "
                   f"SR={sr:.0%}  B={metrics.pct_c_compressed:.0%}  "
                   f"comp=[{comp}]  d8={metrics.mean_delta_8:.3f}"
-                  f"{burst_info}{dist_info}{sac_info}{reg_info}{nt_info}")
+                  f"{burst_info}{dist_info}{sac_info}{meta_info}"
+                  f"{reg_info}{nt_info}")
 
         # Stagnation check for D reflection
         if ((ep + 1) % stagnation_window == 0
@@ -592,6 +611,7 @@ def run_grid_size(
     log_dir: Optional[Path] = None,
     dreamer_b: bool = False,
     sac_c: bool = False,
+    meta_d: bool = False,
 ) -> Tuple[List[StageResult], int]:
     """Run all 3 Dreyfus stages for one grid size.
 
@@ -603,6 +623,8 @@ def run_grid_size(
         print(f"  B-Agent: DreamerAgentB (Phase 5a neural forward-model)")
     if sac_c:
         print(f"  C-Agent: SACAgentC (Phase 5b neural action selection)")
+    if meta_d:
+        print(f"  D-Agent: MetaControllerAgentD (Phase 5c neural meta-controller)")
     print(f"{'#'*60}")
 
     # Helper: create B agent (deterministic or dreamer wrapper)
@@ -620,6 +642,15 @@ def run_grid_size(
         inner_c = AutonomousDoorKeyAgentC(goal_mode="seek")
         sac_agent_c_ref = SACAgentC(
             inner=inner_c,
+            use_neural=False,  # Background-only: OFF mode, no governance impact
+        )
+
+    # Helper: create persistent Meta-D agent (accumulates replay across stages)
+    meta_agent_d_ref = None
+    if meta_d:
+        from agents.meta_controller_agent_d import MetaControllerAgentD
+        meta_agent_d_ref = MetaControllerAgentD(
+            inner=event_d,
             use_neural=False,  # Background-only: OFF mode, no governance impact
         )
 
@@ -646,6 +677,7 @@ def run_grid_size(
         seed_base=seed_base, global_ep_offset=ep_offset,
         verbose=verbose,
         sac_agent_c=sac_agent_c_ref,
+        meta_agent_d=meta_agent_d_ref,
     )
     stage_results.append(s1)
     ep_offset += len(s1.episodes)
@@ -711,6 +743,7 @@ def run_grid_size(
         min_stage2_eps=min_s2_eps,
         fast_fail=fast_fail,
         sac_agent_c=sac_agent_c_ref,
+        meta_agent_d=meta_agent_d_ref,
     )
     stage_results.append(s2)
     ep_offset += len(s2.episodes)
@@ -723,6 +756,7 @@ def run_grid_size(
         stage1_avg_steps=s1.avg_steps_successful,
         verbose=verbose,
         sac_agent_c=sac_agent_c_ref,
+        meta_agent_d=meta_agent_d_ref,
     )
     stage_results.append(s3)
     ep_offset += len(s3.episodes)
@@ -867,6 +901,7 @@ def save_csv(
         "distiller_train_count", "no_target_ticks",
         "regime",
         "sac_c_mode", "sac_c_accuracy", "sac_c_episodes_trained",
+        "meta_d_mode", "meta_d_accuracy", "meta_d_episodes_trained",
     ]
 
     rows = []
@@ -913,6 +948,9 @@ def save_csv(
                     "sac_c_mode": ep.sac_c_mode,
                     "sac_c_accuracy": ep.sac_c_accuracy,
                     "sac_c_episodes_trained": ep.sac_c_episodes_trained,
+                    "meta_d_mode": ep.meta_d_mode,
+                    "meta_d_accuracy": ep.meta_d_accuracy,
+                    "meta_d_episodes_trained": ep.meta_d_episodes_trained,
                 })
 
     with open(path, "w", newline="") as f:
@@ -1176,6 +1214,8 @@ def main() -> bool:
                         help="Use DreamerAgentB (Phase 5a neural forward-model)")
     parser.add_argument("--sac-c", action="store_true",
                         help="Use SACAgentC (Phase 5b neural action selection)")
+    parser.add_argument("--meta-d", action="store_true",
+                        help="Use MetaControllerAgentD (Phase 5c neural meta-controller)")
     args = parser.parse_args()
 
     # Seed-sanity mode: quick multi-seed regression check
@@ -1206,6 +1246,8 @@ def main() -> bool:
     print(f"  Trust threshold: tau={args.trust_threshold:.2f}")
     if args.sac_c:
         print(f"  SAC-C: enabled (Phase 5b, background learning)")
+    if args.meta_d:
+        print(f"  Meta-D: enabled (Phase 5c, background learning)")
 
     t0 = time.time()
     all_results: Dict[int, List[StageResult]] = {}
@@ -1231,6 +1273,7 @@ def main() -> bool:
             log_dir=_log_dir,
             dreamer_b=args.dreamer_b,
             sac_c=args.sac_c,
+            meta_d=args.meta_d,
         )
         all_results[size] = stage_results
         global_ep += n_eps
