@@ -188,6 +188,23 @@ class UnifiedMemory:
         self.write("grounding_violations", report.grounding_violations, "L3", tick)
         self.write("narrative_length", report.narrative_length, "L3", tick)
 
+    def populate_from_b_dynamics(self, dreamer_status: dict, tick: int) -> None:
+        """Sync L1 from B's learned dynamics (Phase 5a).
+
+        B writes experienced transitions and derived walkability to L1.
+        A may read L1 to extend its belief map beyond ego-view.
+        L0 (A's direct observation) remains A's authority.
+        """
+        if "prediction_accuracy" in dreamer_status:
+            self.write("b_prediction_accuracy",
+                       dreamer_status["prediction_accuracy"], "L1", tick)
+        if "experienced_walkable" in dreamer_status:
+            self.write("experienced_walkable",
+                       dreamer_status["experienced_walkable"], "L1", tick)
+        if "experienced_blocked" in dreamer_status:
+            self.write("experienced_blocked",
+                       dreamer_status["experienced_blocked"], "L1", tick)
+
     # ------------------------------------------------------------------
     # Delta mapping
     # ------------------------------------------------------------------

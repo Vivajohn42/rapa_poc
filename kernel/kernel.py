@@ -780,6 +780,13 @@ class MvpKernel:
                 if _agent is not None:
                     _agent.learner.observe_signal(_signal)
 
+        # ---- 14a. B dynamics → L1 persistence (Phase 5a) ----
+        if self.agent_b is not None and self._unified_memory is not None:
+            _b_status = self.agent_b.learner.ready()
+            if _b_status.mode != LearnerMode.OFF:
+                self._unified_memory.populate_from_b_dynamics(
+                    {"prediction_accuracy": _b_status.accuracy}, tick=t)
+
         # ---- 14b. Episode-end learning ----
         if done:
             for _agent in (self.agent_a, self.agent_b,

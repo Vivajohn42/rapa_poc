@@ -112,6 +112,10 @@ class EpisodeMetrics:
     distiller_train_count: int = 0   # number of train() calls so far
     no_target_ticks: int = 0         # ticks where no target was available
     regime: str = "ORIENT"            # active DEF regime (dominant this episode)
+    # SAC Agent C metrics (Phase 5b)
+    sac_c_mode: str = "OFF"           # learner mode: OFF/TRAINING/READY
+    sac_c_accuracy: float = 0.0       # action agreement with deterministic C
+    sac_c_episodes_trained: int = 0   # episodes trained so far
 
 
 @dataclass
@@ -183,23 +187,28 @@ def run_episode(
     stage: int,
     global_ep: int,
     stage_ep: int,
+    sac_agent_c=None,
 ) -> EpisodeMetrics:
     """Run a single DoorKey episode, collecting governance metrics."""
     env = DoorKeyEnv(size=size, seed=seed)
     obs = env.reset()
     obj_mem = ObjectMemory(grid_size=size)
 
-    # Per-episode agents (stateless)
+    # Per-episode agents (stateless — except B and SAC-C which are persistent)
     agent_a = DoorKeyAgentA()
-    agent_b = DoorKeyAgentB()
-    agent_c = AutonomousDoorKeyAgentC(goal_mode="seek")
-    agent_c.set_object_memory(obj_mem)
+    agent_b = kernel.agent_b  # Keep persistent B (DreamerAgentB accumulates replay)
+    if sac_agent_c is not None:
+        # Persistent SAC-C: reset per-episode state, sync ObjectMemory
+        agent_c = sac_agent_c
+        agent_c.set_object_memory(obj_mem)
+    else:
+        agent_c = AutonomousDoorKeyAgentC(goal_mode="seek")
+        agent_c.set_object_memory(obj_mem)
     event_d.set_object_memory(obj_mem)
     event_d.reset_episode()
 
-    # Swap agents on persistent kernel
+    # Swap agents on persistent kernel (B stays, SAC-C stays if provided)
     kernel.agent_a = agent_a
-    kernel.agent_b = agent_b
     kernel.agent_c = agent_c
     # kernel.agent_d stays: event_d is persistent
 
@@ -224,10 +233,17 @@ def run_episode(
         # 2. Sync C and B with ObjectMemory state
         phase = _derive_phase(obj_mem)
         agent_c.phase = phase
-        agent_c.key_pos = obj_mem.key_pos
-        agent_c.door_pos = obj_mem.door_pos
-        agent_c.carrying_key = obj_mem.carrying_key
-        agent_c.door_open = obj_mem.door_open
+        if sac_agent_c is not None:
+            # SACAgentC needs explicit attribute sync (forwarded to inner)
+            agent_c.key_pos = obj_mem.key_pos
+            agent_c.door_pos = obj_mem.door_pos
+            agent_c.carrying_key = obj_mem.carrying_key
+            agent_c.door_open = obj_mem.door_open
+        else:
+            agent_c.key_pos = obj_mem.key_pos
+            agent_c.door_pos = obj_mem.door_pos
+            agent_c.carrying_key = obj_mem.carrying_key
+            agent_c.door_open = obj_mem.door_open
         agent_b.update_door_state(obj_mem.door_pos, obj_mem.door_open)
 
         # 3. Kernel tick
@@ -349,6 +365,12 @@ def run_episode(
         distiller_train_count=distiller.train_count if distiller is not None else 0,
         no_target_ticks=kernel.no_target_ticks,
         regime=_shadow_regime_name,
+        sac_c_mode=(sac_agent_c.learner.ready().mode.name
+                     if sac_agent_c is not None else "OFF"),
+        sac_c_accuracy=(sac_agent_c.learner.ready().accuracy
+                         if sac_agent_c is not None else 0.0),
+        sac_c_episodes_trained=(sac_agent_c.learner.ready().episodes_trained
+                                 if sac_agent_c is not None else 0),
     )
 
 
@@ -370,6 +392,7 @@ def run_stage(
     stagnation_window: int = 5,
     min_stage2_eps: int = 0,
     fast_fail: bool = False,
+    sac_agent_c=None,
 ) -> StageResult:
     """Run one Dreyfus stage, checking exit criteria each episode.
 
@@ -400,6 +423,7 @@ def run_stage(
             stage=stage,
             global_ep=global_ep,
             stage_ep=ep,
+            sac_agent_c=sac_agent_c,
         )
         result.episodes.append(metrics)
 
@@ -437,10 +461,15 @@ def run_stage(
             burst_info = f"  burst={metrics.replan_burst_count}" if metrics.replan_burst_count > 0 else ""
             reg_info = (f"  reg={metrics.regime}"
                         if metrics.regime != "ORIENT" else "")
+            sac_info = ""
+            if metrics.sac_c_mode != "OFF":
+                sac_info = (f"  SAC={metrics.sac_c_mode[:3]}"
+                            f"(acc={metrics.sac_c_accuracy:.0%}"
+                            f",ep={metrics.sac_c_episodes_trained})")
             print(f"  ep {ep:3d}: {status:4s}  steps={metrics.steps:3d}  "
                   f"SR={sr:.0%}  B={metrics.pct_c_compressed:.0%}  "
                   f"comp=[{comp}]  d8={metrics.mean_delta_8:.3f}"
-                  f"{burst_info}{dist_info}{reg_info}{nt_info}")
+                  f"{burst_info}{dist_info}{sac_info}{reg_info}{nt_info}")
 
         # Stagnation check for D reflection
         if ((ep + 1) % stagnation_window == 0
@@ -561,6 +590,8 @@ def run_grid_size(
     trust_threshold: float = 0.35,
     fast_fail: bool = False,
     log_dir: Optional[Path] = None,
+    dreamer_b: bool = False,
+    sac_c: bool = False,
 ) -> Tuple[List[StageResult], int]:
     """Run all 3 Dreyfus stages for one grid size.
 
@@ -568,7 +599,29 @@ def run_grid_size(
     """
     print(f"\n{'#'*60}")
     print(f"  GRID SIZE: {size}x{size}")
+    if dreamer_b:
+        print(f"  B-Agent: DreamerAgentB (Phase 5a neural forward-model)")
+    if sac_c:
+        print(f"  C-Agent: SACAgentC (Phase 5b neural action selection)")
     print(f"{'#'*60}")
+
+    # Helper: create B agent (deterministic or dreamer wrapper)
+    def _make_agent_b():
+        inner = DoorKeyAgentB()
+        if dreamer_b:
+            from agents.dreamer_agent_b import DreamerAgentB
+            return DreamerAgentB(inner=inner, use_neural=False)
+        return inner
+
+    # Helper: create persistent SAC-C agent (accumulates replay across stages)
+    sac_agent_c_ref = None
+    if sac_c:
+        from agents.sac_agent_c import SACAgentC
+        inner_c = AutonomousDoorKeyAgentC(goal_mode="seek")
+        sac_agent_c_ref = SACAgentC(
+            inner=inner_c,
+            use_neural=False,  # Background-only: OFF mode, no governance impact
+        )
 
     stage_results: List[StageResult] = []
     ep_offset = global_ep_offset
@@ -576,7 +629,7 @@ def run_grid_size(
     # ---- Stage 1: Novice (no UM, no compression) ----
     kernel_s1 = MvpKernel(
         agent_a=DoorKeyAgentA(),
-        agent_b=DoorKeyAgentB(),
+        agent_b=_make_agent_b(),
         agent_c=AutonomousDoorKeyAgentC(goal_mode="seek"),
         agent_d=event_d,
         goal_map=None,
@@ -592,6 +645,7 @@ def run_grid_size(
         max_episodes=max_per_stage, max_steps=max_steps,
         seed_base=seed_base, global_ep_offset=ep_offset,
         verbose=verbose,
+        sac_agent_c=sac_agent_c_ref,
     )
     stage_results.append(s1)
     ep_offset += len(s1.episodes)
@@ -618,7 +672,7 @@ def run_grid_size(
 
     kernel_s2 = MvpKernel(
         agent_a=DoorKeyAgentA(),
-        agent_b=DoorKeyAgentB(),
+        agent_b=_make_agent_b(),
         agent_c=AutonomousDoorKeyAgentC(goal_mode="seek"),
         agent_d=event_d,
         goal_map=None,
@@ -656,6 +710,7 @@ def run_grid_size(
         verbose=verbose,
         min_stage2_eps=min_s2_eps,
         fast_fail=fast_fail,
+        sac_agent_c=sac_agent_c_ref,
     )
     stage_results.append(s2)
     ep_offset += len(s2.episodes)
@@ -667,6 +722,7 @@ def run_grid_size(
         seed_base=seed_base, global_ep_offset=ep_offset,
         stage1_avg_steps=s1.avg_steps_successful,
         verbose=verbose,
+        sac_agent_c=sac_agent_c_ref,
     )
     stage_results.append(s3)
     ep_offset += len(s3.episodes)
@@ -810,6 +866,7 @@ def save_csv(
         "distiller_n_frontier", "distiller_n_frontier_eval",
         "distiller_train_count", "no_target_ticks",
         "regime",
+        "sac_c_mode", "sac_c_accuracy", "sac_c_episodes_trained",
     ]
 
     rows = []
@@ -853,6 +910,9 @@ def save_csv(
                     "distiller_train_count": ep.distiller_train_count,
                     "no_target_ticks": ep.no_target_ticks,
                     "regime": ep.regime,
+                    "sac_c_mode": ep.sac_c_mode,
+                    "sac_c_accuracy": ep.sac_c_accuracy,
+                    "sac_c_episodes_trained": ep.sac_c_episodes_trained,
                 })
 
     with open(path, "w", newline="") as f:
@@ -1112,6 +1172,10 @@ def main() -> bool:
                         help="Print every episode")
     parser.add_argument("--log-dir", type=str, default=None,
                         help="Directory for JSONL telemetry log (default: None)")
+    parser.add_argument("--dreamer-b", action="store_true",
+                        help="Use DreamerAgentB (Phase 5a neural forward-model)")
+    parser.add_argument("--sac-c", action="store_true",
+                        help="Use SACAgentC (Phase 5b neural action selection)")
     args = parser.parse_args()
 
     # Seed-sanity mode: quick multi-seed regression check
@@ -1140,6 +1204,8 @@ def main() -> bool:
     print(f"  Max per stage: {args.max_per_stage}")
     print(f"  Seed: {args.seed}")
     print(f"  Trust threshold: tau={args.trust_threshold:.2f}")
+    if args.sac_c:
+        print(f"  SAC-C: enabled (Phase 5b, background learning)")
 
     t0 = time.time()
     all_results: Dict[int, List[StageResult]] = {}
@@ -1163,6 +1229,8 @@ def main() -> bool:
             trust_threshold=args.trust_threshold,
             fast_fail=args.fast_fail,
             log_dir=_log_dir,
+            dreamer_b=args.dreamer_b,
+            sac_c=args.sac_c,
         )
         all_results[size] = stage_results
         global_ep += n_eps
