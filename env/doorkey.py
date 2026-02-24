@@ -12,7 +12,7 @@ Key adaptations:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 
 import gymnasium as gym
 import numpy as np
@@ -59,6 +59,7 @@ class DoorKeyState:
     door_state: Optional[int]                   # 0=open, 1=closed, 2=locked
     hint: Optional[str]                         # phase transition / discovery hint
     phase: str                                  # FIND_KEY, OPEN_DOOR, REACH_GOAL
+    image: Any = None                           # 7×7×3 uint8 ego-view (MiniGrid raw obs)
 
 
 class DoorKeyEnv:
@@ -142,6 +143,10 @@ class DoorKeyEnv:
             if self._door_pos not in obstacles:
                 obstacles.append(self._door_pos)
 
+        # Raw ego-view observation (7×7×3 uint8) for neural agents
+        raw_obs = uw.gen_obs()
+        image = raw_obs["image"]  # (7, 7, 3) uint8
+
         return DoorKeyState(
             width=self.size,
             height=self.size,
@@ -155,6 +160,7 @@ class DoorKeyEnv:
             door_state=self._door_state,
             hint=hint,
             phase=self._phase,
+            image=image,
         )
 
     def _scan_grid(self) -> None:

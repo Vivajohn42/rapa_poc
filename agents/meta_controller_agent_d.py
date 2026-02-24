@@ -45,7 +45,7 @@ class MetaControllerAgentD(StreamD):
 
     Wraps a deterministic StreamD and attaches a MetaControllerLearnerD.
     report_meaning() delegates to inner during TRAINING.
-    When READY and use_neural=True, overrides phase + confidence in MeaningReport.
+    When READY (or forced after warmup), overrides phase + confidence in MeaningReport.
     Event detection and tag generation always stay deterministic.
     """
 
@@ -54,6 +54,7 @@ class MetaControllerAgentD(StreamD):
         inner: Optional[StreamD] = None,
         *,
         use_neural: bool = True,
+        force_neural_after_warmup: bool = False,
         warmup_episodes: int = 30,
         ready_threshold: float = 0.80,
         ready_window: int = 20,
@@ -67,6 +68,7 @@ class MetaControllerAgentD(StreamD):
             inner = EventPatternD()
         self._inner = inner
         self._use_neural = use_neural
+        self._force_neural_after_warmup = force_neural_after_warmup
 
         # StreamD requires events and seen_positions attributes
         self.events = self._inner.events
@@ -140,9 +142,16 @@ class MetaControllerAgentD(StreamD):
 
         base = self._inner.report_meaning()
 
-        if (not self._use_neural
-                or self._learner_impl.mode != LearnerMode.READY):
-            return base  # Deterministic during TRAINING/OFF
+        # Gate: use neural when READY, or when forced after warmup
+        can_use_neural = (
+            self._use_neural
+            and (self._learner_impl.mode == LearnerMode.READY
+                 or (self._force_neural_after_warmup
+                     and self._learner_impl._episodes_trained
+                         >= self._learner_impl._warmup_episodes))
+        )
+        if not can_use_neural:
+            return base
 
         # Neural override
         features = self._extract_features()
@@ -460,7 +469,9 @@ class MetaControllerLearnerD(StreamLearner):
             self._last_accuracy = combined_acc
 
         # Don't train if OFF or not enough data
-        if self._mode == LearnerMode.OFF:
+        # (skip OFF-check when force_neural is active — keep training)
+        if (self._mode == LearnerMode.OFF
+                and not self._agent._force_neural_after_warmup):
             self._episodes_trained += 1
             return
         if len(self._replay) < self._batch_size:

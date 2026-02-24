@@ -62,6 +62,7 @@ class SACAgentC(StreamC):
         inner: Optional[StreamC] = None,
         *,
         use_neural: bool = True,
+        force_neural_after_warmup: bool = False,
         b_learner_fn: Optional[Callable] = None,
         warmup_episodes: int = 50,
         ready_threshold: float = 0.80,
@@ -81,6 +82,7 @@ class SACAgentC(StreamC):
             inner = AutonomousDoorKeyAgentC(goal_mode="seek")
         self._inner = inner
         self._use_neural = use_neural
+        self._force_neural_after_warmup = force_neural_after_warmup
 
         # Phase state (forwarded to inner in choose_action)
         self.phase: str = "FIND_KEY"
@@ -110,6 +112,7 @@ class SACAgentC(StreamC):
         # Cached state for transition tracking
         self._cached_features: Optional[torch.Tensor] = None
         self._cached_nav_action_idx: Optional[int] = None
+        self._cached_det_nav_action_idx: Optional[int] = None  # det-C's action (for accuracy metric)
         self._cached_target: Optional[Tuple[int, int]] = None
 
     def choose_action(
@@ -154,16 +157,25 @@ class SACAgentC(StreamC):
             # Cache the deterministic C's navigation action index (for IL labels)
             if det_action in NAV_ACTION_TO_IDX:
                 self._cached_nav_action_idx = NAV_ACTION_TO_IDX[det_action]
+                self._cached_det_nav_action_idx = NAV_ACTION_TO_IDX[det_action]
             else:
                 self._cached_nav_action_idx = None  # interaction action
+                self._cached_det_nav_action_idx = None
         else:
             self._cached_features = None
             self._cached_target = None
             self._cached_nav_action_idx = None
+            self._cached_det_nav_action_idx = None
 
-        # If SAC not READY, return deterministic action
-        if (not self._use_neural
-                or self._learner_impl.mode != LearnerMode.READY):
+        # Gate: use neural when READY, or when forced after warmup
+        can_use_neural = (
+            self._use_neural
+            and (self._learner_impl.mode == LearnerMode.READY
+                 or (self._force_neural_after_warmup
+                     and self._learner_impl._episodes_trained
+                         >= self._learner_impl._warmup_episodes))
+        )
+        if not can_use_neural:
             return det_action, det_scored
 
         # SAC READY: use neural policy for navigation
@@ -171,13 +183,20 @@ class SACAgentC(StreamC):
             # No target: fall back to deterministic exploration
             return det_action, det_scored
 
-        # Run SAC actor (greedy at deployment)
+        # Run SAC actor: sample from softmax policy (SAC = max-entropy RL).
+        # Stochastic policy maintains exploration and avoids mode collapse.
         with torch.no_grad():
             logits = self._learner_impl._actor(
                 self._cached_features.unsqueeze(0)).squeeze(0)
-            action_idx = logits.argmax().item()
+            probs = F.softmax(logits, dim=-1)
+            action_idx = torch.multinomial(probs, 1).item()
 
         nav_action = NAV_ACTION_NAMES[action_idx]
+
+        # Update cached action to SAC's choice (not det-C's) so the
+        # replay buffer records the action that was ACTUALLY executed.
+        # Critical for correct RL training after IL warmstart.
+        self._cached_nav_action_idx = action_idx
 
         # Check interaction overrides (deterministic pickup/toggle)
         facing = self._facing_pos(zA)
@@ -348,6 +367,13 @@ class SACLearnerC(StreamLearner):
         self._episode_buffer: List[Tuple[
             torch.Tensor, int, float, torch.Tensor, float]] = []
 
+        # Separate IL replay: stores det-C's transitions during warmup.
+        # These are NEVER overwritten by SAC's own experience.
+        # Mixed into SAC batches (25%) to prevent catastrophic forgetting.
+        self._il_replay: List[Tuple[
+            torch.Tensor, int, float, torch.Tensor, float]] = []
+        self._il_replay_max: int = 2000
+
         # Accuracy tracking
         self._eval_window: deque = deque(maxlen=ready_window)
         self._episodes_trained: int = 0
@@ -400,15 +426,18 @@ class SACLearnerC(StreamLearner):
         # Get current cached features from agent
         curr_features = self._agent._cached_features
         curr_nav_idx = self._agent._cached_nav_action_idx
+        # Use det-C's action for accuracy (NOT SAC's sampled action).
+        # After warmup, _cached_nav_action_idx becomes SAC's own action,
+        # which would make accuracy measure entropy, not quality.
+        curr_det_idx = self._agent._cached_det_nav_action_idx
 
-        # Track action agreement (SAC vs deterministic C)
-        if curr_nav_idx is not None and curr_features is not None:
+        # Track action agreement (SAC-argmax vs deterministic C)
+        if curr_det_idx is not None and curr_features is not None:
             self._episode_nav_ticks += 1
-            # Check if SAC would pick the same action
             with torch.no_grad():
                 logits = self._actor(curr_features.unsqueeze(0)).squeeze(0)
                 sac_choice = logits.argmax().item()
-            if sac_choice == curr_nav_idx:
+            if sac_choice == curr_det_idx:
                 self._episode_matches += 1
 
         # Build transition from previous tick
@@ -440,6 +469,14 @@ class SACLearnerC(StreamLearner):
 
         IL warmstart for first warmup_episodes, then SAC training.
         """
+        # During IL warmstart: save episode transitions to protected IL buffer
+        # BEFORE flushing to replay (episode_buffer is cleared below).
+        # IL transitions contain det-C's correct actions + rewards.
+        if self._episodes_trained < self._warmup_episodes and self._episode_buffer:
+            self._il_replay.extend(self._episode_buffer)
+            if len(self._il_replay) > self._il_replay_max:
+                self._il_replay = self._il_replay[-self._il_replay_max:]
+
         # Flush episode buffer to replay
         self._replay.extend(self._episode_buffer)
 
@@ -451,7 +488,9 @@ class SACLearnerC(StreamLearner):
         self._episode_buffer.clear()
 
         # Don't train if not enough data or mode is OFF
-        if self._mode == LearnerMode.OFF:
+        # (skip OFF-check when force_neural is active — keep training)
+        if (self._mode == LearnerMode.OFF
+                and not self._agent._force_neural_after_warmup):
             self._episodes_trained += 1
             return
         if len(self._replay) < self._batch_size:
@@ -526,6 +565,9 @@ class SACLearnerC(StreamLearner):
     def _il_warmstart_train(self) -> None:
         """Cross-entropy from deterministic teacher's navigation decisions.
 
+        Uses inverse-frequency class weights to prevent mode collapse
+        (agent always picking 'forward' because it's the most common).
+
         Also pre-trains the critic with 1-step TD targets.
         """
         batch_size = min(len(self._replay), self._batch_size)
@@ -537,9 +579,16 @@ class SACLearnerC(StreamLearner):
         next_features = torch.stack([t[3] for t in batch])
         dones = torch.tensor([t[4] for t in batch], dtype=torch.float32)
 
-        # Actor: cross-entropy against teacher's action
+        # Compute inverse-frequency weights for balanced cross-entropy.
+        # Prevents mode collapse to most common action (typically 'forward').
+        counts = torch.bincount(actions, minlength=SAC_NAV_ACTIONS).float()
+        counts = counts.clamp(min=1.0)  # avoid div-by-zero
+        weights = (1.0 / counts)
+        weights = weights / weights.sum() * SAC_NAV_ACTIONS  # normalize
+
+        # Actor: weighted cross-entropy against teacher's action
         logits = self._actor(features)
-        actor_loss = F.cross_entropy(logits, actions)
+        actor_loss = F.cross_entropy(logits, actions, weight=weights)
 
         self._actor_optimizer.zero_grad()
         actor_loss.backward()
@@ -572,11 +621,25 @@ class SACLearnerC(StreamLearner):
     # ------------------------------------------------------------------
 
     def _sac_train_step(self) -> None:
-        """One step of discrete SAC training."""
+        """One step of discrete SAC training.
+
+        Mixes 75% live replay + 25% IL replay (if available) to prevent
+        catastrophic forgetting of det-C's good navigation decisions.
+        """
         if len(self._replay) < self._batch_size:
             return
 
-        batch = random.sample(list(self._replay), self._batch_size)
+        # Mix: 75% from live replay, 25% from IL replay (if available)
+        if self._il_replay:
+            n_il = max(1, self._batch_size // 4)
+            n_live = self._batch_size - n_il
+            live_batch = random.sample(
+                list(self._replay), min(n_live, len(self._replay)))
+            il_batch = random.sample(
+                self._il_replay, min(n_il, len(self._il_replay)))
+            batch = live_batch + il_batch
+        else:
+            batch = random.sample(list(self._replay), self._batch_size)
 
         states = torch.stack([t[0] for t in batch])
         actions = torch.tensor([t[1] for t in batch], dtype=torch.long)
@@ -644,15 +707,18 @@ class SACLearnerC(StreamLearner):
 
         Threshold: 80% agreement with deterministic C over 20 episodes.
         If use_neural=False, stays OFF (background learning).
+        When force_neural_after_warmup=True, B-cascade check is skipped
+        so C keeps training even if B hasn't reached READY.
         """
         if not self._agent._use_neural:
             self._mode = LearnerMode.OFF
             return
 
-        # Check B readiness (cascade)
-        if not self._check_b_readiness():
-            self._mode = LearnerMode.OFF
-            return
+        # Check B readiness (cascade) — skip when force_neural is active
+        if not self._agent._force_neural_after_warmup:
+            if not self._check_b_readiness():
+                self._mode = LearnerMode.OFF
+                return
 
         if len(self._eval_window) >= self._eval_window.maxlen:
             avg = sum(self._eval_window) / len(self._eval_window)

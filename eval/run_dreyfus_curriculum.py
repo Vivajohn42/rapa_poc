@@ -286,6 +286,11 @@ def run_episode(
             obj_mem.update(env._env.unwrapped)
             kernel.tick(t + 1, obs, done=True)
             break
+    else:
+        # Timeout: episode ended without success.
+        # Fire done=True tick so learners get their learn() call
+        # (increments _episodes_trained, flushes replay buffer, etc.)
+        kernel.tick(max_steps, obs, done=True)
 
     # Episode end
     success = done and reward > 0
@@ -612,6 +617,8 @@ def run_grid_size(
     dreamer_b: bool = False,
     sac_c: bool = False,
     meta_d: bool = False,
+    use_neural: bool = False,
+    force_neural: bool = False,
 ) -> Tuple[List[StageResult], int]:
     """Run all 3 Dreyfus stages for one grid size.
 
@@ -625,14 +632,21 @@ def run_grid_size(
         print(f"  C-Agent: SACAgentC (Phase 5b neural action selection)")
     if meta_d:
         print(f"  D-Agent: MetaControllerAgentD (Phase 5c neural meta-controller)")
+    if use_neural:
+        mode = "FORCED (after warmup)" if force_neural else "GATED (READY only)"
+        print(f"  Neural mode: {mode}")
     print(f"{'#'*60}")
 
     # Helper: create B agent (deterministic or dreamer wrapper)
+    # NOTE: B never gets force_neural — its neural predictions feed
+    # directly into C's action scoring.  Bad predictions destroy
+    # everything.  B goes neural only when it proves READY on its own.
     def _make_agent_b():
         inner = DoorKeyAgentB()
         if dreamer_b:
             from agents.dreamer_agent_b import DreamerAgentB
-            return DreamerAgentB(inner=inner, use_neural=False)
+            return DreamerAgentB(inner=inner, use_neural=use_neural,
+                                force_neural_after_warmup=False)
         return inner
 
     # Helper: create persistent SAC-C agent (accumulates replay across stages)
@@ -642,7 +656,8 @@ def run_grid_size(
         inner_c = AutonomousDoorKeyAgentC(goal_mode="seek")
         sac_agent_c_ref = SACAgentC(
             inner=inner_c,
-            use_neural=False,  # Background-only: OFF mode, no governance impact
+            use_neural=use_neural,
+            force_neural_after_warmup=force_neural,
         )
 
     # Helper: create persistent Meta-D agent (accumulates replay across stages)
@@ -651,7 +666,8 @@ def run_grid_size(
         from agents.meta_controller_agent_d import MetaControllerAgentD
         meta_agent_d_ref = MetaControllerAgentD(
             inner=event_d,
-            use_neural=False,  # Background-only: OFF mode, no governance impact
+            use_neural=use_neural,
+            force_neural_after_warmup=force_neural,
         )
 
     stage_results: List[StageResult] = []

@@ -38,8 +38,8 @@ class DreamerAgentB(StreamB):
     """Stream B with neural forward-model learning.
 
     Wraps a deterministic StreamB and attaches a MicroDreamerLearner.
-    predict_next() always delegates to the inner model during TRAINING.
-    When READY and use_neural=True, uses the learned model instead.
+    predict_next() delegates to the inner model during TRAINING (default).
+    When READY (or forced after min_train_episodes), uses the learned model.
     """
 
     def __init__(
@@ -47,6 +47,8 @@ class DreamerAgentB(StreamB):
         inner: Optional[StreamB] = None,
         *,
         use_neural: bool = True,
+        force_neural_after_warmup: bool = False,
+        min_train_episodes: int = 20,
         ready_threshold: float = 0.95,
         ready_window: int = 20,
         replay_max: int = 5000,
@@ -59,6 +61,8 @@ class DreamerAgentB(StreamB):
             inner = AgentB()
         self._inner = inner
         self._use_neural = use_neural
+        self._force_neural_after_warmup = force_neural_after_warmup
+        self._min_train_episodes = min_train_episodes
 
         # MicroDreamer learner
         net = MicroDreamerNet()
@@ -97,9 +101,15 @@ class DreamerAgentB(StreamB):
             self._cached_zA = zA
             self._cached_tick = current_tick
 
-        # Delegate prediction
-        if (self._use_neural
-                and self._learner_impl.mode == LearnerMode.READY):
+        # Delegate prediction: neural when READY, or forced after warmup
+        can_use_neural = (
+            self._use_neural
+            and (self._learner_impl.mode == LearnerMode.READY
+                 or (self._force_neural_after_warmup
+                     and self._learner_impl._episodes_trained
+                         >= self._min_train_episodes))
+        )
+        if can_use_neural:
             return self._learner_impl.predict_za(zA, action)
         return self._inner.predict_next(zA, action)
 
