@@ -78,6 +78,14 @@ class KernelCanvasManager:
                 target = tag.split(":")[1].strip()
                 self.write("target", f"Target at {target}")
 
+    def write_prediction(self, prediction: str) -> None:
+        """Write D's narrative prediction to the dedicated prediction slot."""
+        self.write("prediction", prediction)
+
+    def get_prediction(self) -> str | None:
+        """Read the current prediction (for self-correction loop)."""
+        return self.read("prediction")
+
     def reset(self) -> None:
         """Clear all slots for new episode."""
         self.slots.clear()

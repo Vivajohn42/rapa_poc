@@ -20,6 +20,7 @@ class ZD(BaseModel):
     meaning_tags: List[str] = Field(default_factory=list)
     length_chars: int = 0
     grounding_violations: int = 0
+    prediction: str = ""  # F.4: narrative anticipation of next state
 
 
 class ZPlan(BaseModel):

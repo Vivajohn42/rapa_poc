@@ -74,6 +74,16 @@ def deconstruct_d_to_c(
             mem["hint_goal"] = remaining[0]
             mem["target"] = goal_map[remaining[0]]
 
+    # --- F.4: Prediction flags from predict:* tags ---
+    prediction_flags = set()
+    for tag in tags:
+        if tag.startswith("predict:"):
+            flag = tag.split(":", 1)[1].strip()
+            if flag:
+                prediction_flags.add(flag)
+    if prediction_flags:
+        mem["prediction_flags"] = prediction_flags
+
     # --- Optional: store last narrative for introspection/debug ---
     mem["last_narrative"] = zD.narrative
 

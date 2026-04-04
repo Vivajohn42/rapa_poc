@@ -4,6 +4,7 @@ from typing import List, Optional
 
 from state.schema import ZA, ZD
 from llm.provider import LLMProvider
+from llm.output_parser import parse_narrative_tags
 
 
 @dataclass
@@ -43,7 +44,10 @@ class AgentDLLM(StreamD):
         ))
         self.seen_positions.add(zA.agent_pos)
 
-    def build_micro(self, goal_mode: str, goal_pos=None, last_n: int = 6) -> ZD:
+    def build_micro(
+        self, goal_mode: str, goal_pos=None, last_n: int = 6,
+        action: str | None = None, zA_next: ZA | None = None,
+    ) -> ZD:
         # goal_pos is accepted for drop-in compatibility with AgentD (can be None / ignored)
         slice_events = self.events[-last_n:] if self.events else []
         facts = [
@@ -63,26 +67,47 @@ class AgentDLLM(StreamD):
 
         user = "FACTS:\n" + "\n".join(facts) + f"\nMODE={goal_mode}\n"
 
+        # F.4: Action context for prediction
+        if action is not None:
+            user += f"ACTION_TAKEN={action}\n"
+        if zA_next is not None:
+            user += f"NEXT_POS={zA_next.agent_pos}\n"
 
-        txt = self.llm.chat(
-            [{"role": "system", "content": system},
-             {"role": "user", "content": user}],
-            temperature=0.2,
-            max_tokens=80,
-        ).strip()
+        # F.4: Self-correction — inject previous prediction
+        prev_prediction = ""
+        if hasattr(self.llm, "canvas_manager") and self.llm.canvas_manager is not None:
+            prev = getattr(self.llm.canvas_manager, "get_prediction", lambda: None)()
+            if prev:
+                prev_prediction = prev
+                user += f"PREV_PREDICTION={prev}\n"
 
-        narrative = ""
-        tags: List[str] = []
+        # F.4: Use two-phase generation if provider supports it
+        prediction_supported = hasattr(self.llm, "chat") and action is not None
+        try:
+            result = self.llm.chat(
+                [{"role": "system", "content": system},
+                 {"role": "user", "content": user}],
+                temperature=0.2,
+                max_tokens=80,
+                prediction_enabled=prediction_supported,
+            )
+        except TypeError:
+            # Provider doesn't support prediction_enabled kwarg (e.g. OllamaProvider)
+            result = self.llm.chat(
+                [{"role": "system", "content": system},
+                 {"role": "user", "content": user}],
+                temperature=0.2,
+                max_tokens=80,
+            )
 
-        for line in txt.splitlines():
-            if line.startswith("NARRATIVE:"):
-                narrative = line.split(":", 1)[1].strip()
-            elif line.startswith("TAGS:"):
-                raw = line.split(":", 1)[1].strip()
-                tags = [t.strip() for t in raw.split(",") if t.strip()]
+        if isinstance(result, tuple):
+            txt, prediction = result
+        else:
+            txt, prediction = result.strip() if isinstance(result, str) else str(result), ""
+
+        narrative, tags, fmt_quality = parse_narrative_tags(txt)
 
         # Deterministic hint tag injection (do NOT rely on LLM for this)
-        # If any event contains hint "A" or "B", enforce tag "hint:A"/"hint:B".
         hint_val = None
         for e in reversed(slice_events):
             if e.hint in ("A", "B"):
@@ -90,22 +115,15 @@ class AgentDLLM(StreamD):
                 break
         if hint_val:
             forced = f"hint:{hint_val}"
-            # normalize duplicates
             if forced not in tags and forced.lower() not in [t.lower() for t in tags]:
                 tags.append(forced)
-
-
-        # Fallback if model didn't follow format
-        if not narrative:
-            narrative = txt[:240]
-        if not tags:
-            tags = ["llm_format_fallback"]
 
         return ZD(
             narrative=narrative,
             meaning_tags=tags,
             length_chars=len(narrative),
-            grounding_violations=0
+            grounding_violations=fmt_quality,
+            prediction=prediction,
         )
 
     def build(self, goal_mode: str, goal_pos=None) -> ZD:
@@ -139,18 +157,9 @@ class AgentDLLM(StreamD):
             max_tokens=120,
         ).strip()
 
-        narrative = ""
-        tags: List[str] = []
-
-        for line in txt.splitlines():
-            if line.startswith("NARRATIVE:"):
-                narrative = line.split(":", 1)[1].strip()
-            elif line.startswith("TAGS:"):
-                raw = line.split(":", 1)[1].strip()
-                tags = [t.strip() for t in raw.split(",") if t.strip()]
+        narrative, tags, fmt_quality = parse_narrative_tags(txt)
 
         # Deterministic hint tag injection (do NOT rely on LLM for this)
-        # If any event contains hint "A" or "B", enforce tag "hint:A"/"hint:B".
         hint_val = None
         for e in reversed(slice_events):
             if e.hint in ("A", "B"):
@@ -158,19 +167,12 @@ class AgentDLLM(StreamD):
                 break
         if hint_val:
             forced = f"hint:{hint_val}"
-            # normalize duplicates
             if forced not in tags and forced.lower() not in [t.lower() for t in tags]:
                 tags.append(forced)
-
-
-        if not narrative:
-            narrative = txt[:400]
-        if not tags:
-            tags = ["llm_format_fallback"]
 
         return ZD(
             narrative=narrative,
             meaning_tags=tags,
             length_chars=len(narrative),
-            grounding_violations=0
+            grounding_violations=fmt_quality,
         )

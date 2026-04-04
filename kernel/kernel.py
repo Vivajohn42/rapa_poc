@@ -85,11 +85,13 @@ class MvpKernel:
         regime_controller=None,
         telemetry=None,
         max_steps: int = 200,
+        canvas_manager=None,
     ):
         self.agent_a = agent_a
         self.agent_b = agent_b
         self.agent_c = agent_c
         self.agent_d = agent_d
+        self._canvas_manager = canvas_manager  # F.4: for writing predictions
         self.goal_map = goal_map
         self.enable_governance = enable_governance
         self.jung_profile = jung_profile
@@ -652,11 +654,26 @@ class MvpKernel:
             self.agent_d.observe_step(
                 t=t, zA=zA, action=action, reward=0.0, done=done,
             )
+            # F.4: B's prediction for D's action context
+            zA_next = None
+            if action and self.agent_b is not None:
+                try:
+                    zA_next = self.agent_b.predict_next(zA, action)
+                except Exception:
+                    pass
             zD = self.agent_d.build_micro(
                 goal_mode=zC.goal_mode,
                 goal_pos=(-1, -1),
                 last_n=5,
+                action=action,
+                zA_next=zA_next,
             )
+            # F.4: Write prediction to canvas (kernel is the conductor)
+            if (
+                hasattr(zD, "prediction") and zD.prediction
+                and self._canvas_manager is not None
+            ):
+                self._canvas_manager.write_prediction(zD.prediction)
             # Phase 3: UM sync via MeaningReport (no tag parsing)
             if self._unified_memory is not None:
                 _d_report = self.agent_d.report_meaning()
