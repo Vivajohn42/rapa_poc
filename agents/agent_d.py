@@ -71,7 +71,8 @@ class AgentD(StreamD):
             length_chars=len(narrative),
             grounding_violations=grounding_violations
         )
-    def build_micro(self, goal_mode: str, goal_pos: tuple, last_n: int = 5) -> ZD:
+    def build_micro(self, goal_mode: str, goal_pos: tuple, last_n: int = 5,
+                    action: str | None = None, zA_next=None) -> ZD:
         """
         Short narrative over the last N events; used when D is triggered mid-episode.
         """

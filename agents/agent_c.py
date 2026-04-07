@@ -49,8 +49,11 @@ class AgentC(StreamC):
           if action results in no movement (hit wall/obstacle), subtract a small penalty
           to prevent degenerate "freeze" policies.
         """
-        d_now = self._manhattan(zA.agent_pos, self.goal.target)
-        d_next = self._manhattan(zA_next.agent_pos, self.goal.target)
+        target = self.goal.target
+        if target is None:
+            target = (-1, -1)  # Safe fallback when target not yet discovered
+        d_now = self._manhattan(zA.agent_pos, target)
+        d_next = self._manhattan(zA_next.agent_pos, target)
 
         if self.goal.mode == "seek":
             base = float(d_now - d_next)

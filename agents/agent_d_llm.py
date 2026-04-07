@@ -4,7 +4,7 @@ from typing import List, Optional
 
 from state.schema import ZA, ZD
 from llm.provider import LLMProvider
-from llm.output_parser import parse_narrative_tags
+from llm.output_parser import parse_narrative_tags, parse_full_output
 
 
 @dataclass
@@ -81,31 +81,20 @@ class AgentDLLM(StreamD):
                 prev_prediction = prev
                 user += f"PREV_PREDICTION={prev}\n"
 
-        # F.4: Use two-phase generation if provider supports it
-        prediction_supported = hasattr(self.llm, "chat") and action is not None
+        # Single-pass generation: model produces NARRATIVE + PREDICTION + TAGS
+        # in one block (SFT-aligned models), parsed by parse_full_output.
         try:
             result = self.llm.chat(
                 [{"role": "system", "content": system},
                  {"role": "user", "content": user}],
                 temperature=0.2,
-                max_tokens=80,
-                prediction_enabled=prediction_supported,
+                max_tokens=120,
             )
         except TypeError:
-            # Provider doesn't support prediction_enabled kwarg (e.g. OllamaProvider)
-            result = self.llm.chat(
-                [{"role": "system", "content": system},
-                 {"role": "user", "content": user}],
-                temperature=0.2,
-                max_tokens=80,
-            )
+            result = ""
 
-        if isinstance(result, tuple):
-            txt, prediction = result
-        else:
-            txt, prediction = result.strip() if isinstance(result, str) else str(result), ""
-
-        narrative, tags, fmt_quality = parse_narrative_tags(txt)
+        txt = result.strip() if isinstance(result, str) else str(result)
+        narrative, prediction, tags, fmt_quality = parse_full_output(txt)
 
         # Deterministic hint tag injection (do NOT rely on LLM for this)
         hint_val = None

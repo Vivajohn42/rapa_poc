@@ -79,14 +79,20 @@ class DEFProvider:
         """
         self._call_count += 1
 
-        # Build prompt from messages
-        prompt = ""
+        # Build prompt from messages (match SFT training format exactly)
+        # Training format: system + "\n" + user (no trailing double-newline)
+        parts = []
         if self.canvas_manager is not None:
             prefix = self.canvas_manager.to_prefix()
             if prefix:
-                prompt = prefix + "\n"
+                parts.append(prefix)
         for msg in messages:
-            prompt += msg.get("content", "") + "\n"
+            content = msg.get("content", "")
+            if content:
+                parts.append(content)
+        prompt = "\n".join(parts)
+        # Ensure exactly one trailing newline (training format)
+        prompt = prompt.rstrip("\n") + "\n"
 
         # Tokenize
         input_ids = self.tokenizer.encode(prompt, return_tensors="pt")
