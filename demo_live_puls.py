@@ -144,29 +144,26 @@ def run_live_episode(
             except Exception:
                 pass
 
-            # Show D's output (narrative + prediction)
+            # Show D's output — read raw from LLM provider's last generation
             print(f"  {MAGENTA}[Agent D]{RESET} DEF-Chip generiert... "
                   f"{DIM}({dt_tick*1000:.0f}ms){RESET}")
 
-            # Get last ZD from D's internal state
-            last_events = agent_d.events[-1:] if agent_d.events else []
-            # The narrative/prediction are in the ZD returned by build_micro
-            # We can't easily access it here, so we read from canvas
-            prediction = canvas_manager.get_prediction() or ""
-            last_narrative = ""
-            if hasattr(kernel, '_zC') and kernel._zC and kernel._zC.memory:
-                last_narrative = kernel._zC.memory.get("last_narrative", "")
-                last_tags = kernel._zC.memory.get("last_tags", [])
-                fmt_q = 0  # We'd need to track this; approximate from tags
-                if "llm_format_fallback" in last_tags:
-                    fmt_q = 3
+            raw_text = ""
+            if hasattr(llm, '_last_generated') and llm._last_generated:
+                raw_text = llm.tokenizer.decode(
+                    llm._last_generated, skip_special_tokens=True)
 
-                print(f"     {BOLD}> NARRATIVE:{RESET} {last_narrative[:120]}")
-                if prediction:
-                    print(f"     {BOLD}> PREDICTION:{RESET} {prediction[:120]}")
-                tags_str = ", ".join(str(t) for t in last_tags[:8])
+            if raw_text:
+                from llm.output_parser import parse_full_output
+                narr, pred, tags_parsed, fmt_q = parse_full_output(raw_text)
+                print(f"     {BOLD}> NARRATIVE:{RESET} {narr[:120]}")
+                if pred:
+                    print(f"     {BOLD}> PREDICTION:{RESET} {pred[:120]}")
+                tags_str = ", ".join(tags_parsed[:8])
                 print(f"     {DIM}> TAGS: {tags_str}{RESET}")
                 print(f"     {DIM}> Format: {fmt_quality_label(fmt_q)}{RESET}")
+            else:
+                print(f"     {DIM}(no output){RESET}")
 
             # Show canvas state
             slots = list(canvas_manager.slots.keys())

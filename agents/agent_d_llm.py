@@ -60,9 +60,9 @@ class AgentDLLM(StreamD):
             "RULES:\n"
             "- Use ONLY the FACTS provided.\n"
             "- Do NOT invent positions/actions/rewards/hints.\n"
-            "- Output EXACTLY two lines:\n"
-            "NARRATIVE: <1-2 short sentences>\n"
-            "TAGS: <comma-separated tags; include hint:A or hint:B if any hint appears>\n"
+            "- Output EXACTLY two lines, for example:\n"
+            "NARRATIVE: The agent moved right and discovered a hint.\n"
+            "TAGS: movement, hint:A, goal:seek\n"
         )
 
         user = "FACTS:\n" + "\n".join(facts) + f"\nMODE={goal_mode}\n"
