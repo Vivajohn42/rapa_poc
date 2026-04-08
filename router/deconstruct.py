@@ -1,3 +1,4 @@
+import re
 from typing import Dict, Tuple, Optional
 from state.schema import ZC, ZD
 
@@ -83,6 +84,13 @@ def deconstruct_d_to_c(
                 prediction_flags.add(flag)
     if prediction_flags:
         mem["prediction_flags"] = prediction_flags
+
+    # --- Phase G: ANSWER → reasoning_target for C's tie-breaking ---
+    if hasattr(zD, "prediction") and zD.prediction:
+        pos_match = re.search(r'\((\d+),\s*(\d+)\)', zD.prediction)
+        if pos_match:
+            reasoning_target = (int(pos_match.group(1)), int(pos_match.group(2)))
+            mem["reasoning_target"] = reasoning_target
 
     # --- Optional: store last narrative for introspection/debug ---
     mem["last_narrative"] = zD.narrative

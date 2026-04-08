@@ -151,6 +151,66 @@ def parse_full_output(txt: str) -> tuple[str, str, list[str], int]:
     return narrative, prediction, tags, fmt
 
 
+def parse_reasoning_output(txt: str) -> tuple[str, str, list[str], int]:
+    """Parse REASONING + ANSWER from Chain-of-Thought output.
+
+    Expected format (REASONING before ANSWER):
+        REASONING: <chain-of-thought>
+        ANSWER: <final conclusion>
+
+    Returns: (reasoning, answer, tags, format_quality)
+      tags are extracted from reasoning text (predict:*, hint:*, etc.)
+    """
+    if not txt or not txt.strip():
+        return "", "", ["llm_format_fallback"], 3
+
+    reasoning = ""
+    answer = ""
+
+    # Extract REASONING (everything between REASONING: and ANSWER: or end)
+    m_reason = re.search(
+        r'REASONING:\s*(.+?)(?=\n\s*ANSWER:|\Z)',
+        txt, re.IGNORECASE | re.DOTALL,
+    )
+    if m_reason:
+        reasoning = m_reason.group(1).strip()
+
+    # Extract ANSWER (everything after ANSWER:)
+    m_answer = re.search(r'ANSWER:\s*(.+?)(?=\n|$)', txt, re.IGNORECASE)
+    if m_answer:
+        answer = m_answer.group(1).strip()
+
+    # Extract implicit tags from reasoning text
+    tags: list[str] = []
+    lower = (reasoning + " " + answer).lower()
+    if "explore" in lower:
+        tags.append("reasoning:explore")
+    if "key" in lower:
+        tags.append("reasoning:key")
+    if "locked" in lower or "blocked" in lower:
+        tags.append("reasoning:blocked")
+    if "target" in lower or "goal" in lower:
+        tags.append("reasoning:goal")
+    if "stuck" in lower or "no progress" in lower:
+        tags.append("reasoning:stuck")
+    if not tags:
+        tags.append("reasoning:general")
+
+    # Format quality
+    if reasoning and answer:
+        fmt = 0
+    elif reasoning:
+        fmt = 1
+    elif answer:
+        fmt = 2
+    else:
+        reasoning = txt.strip()[:400]
+        tags = ["llm_format_fallback"]
+        fmt = 3
+
+    return reasoning, answer, tags, fmt
+
+
 def _split_tags(raw: str) -> list[str]:
     """Split tag string on commas or semicolons, strip whitespace."""
     return [t.strip() for t in re.split(r'[,;]', raw) if t.strip()]

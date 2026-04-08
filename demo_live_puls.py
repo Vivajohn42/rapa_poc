@@ -145,7 +145,7 @@ def run_live_episode(
                 pass
 
             # Show D's output — read raw from LLM provider's last generation
-            print(f"  {MAGENTA}[Agent D]{RESET} DEF-Chip generiert... "
+            print(f"  {MAGENTA}[Agent D]{RESET} Reasoning-Chip... "
                   f"{DIM}({dt_tick*1000:.0f}ms){RESET}")
 
             raw_text = ""
@@ -154,14 +154,14 @@ def run_live_episode(
                     llm._last_generated, skip_special_tokens=True)
 
             if raw_text:
-                from llm.output_parser import parse_full_output
-                narr, pred, tags_parsed, fmt_q = parse_full_output(raw_text)
-                print(f"     {BOLD}> NARRATIVE:{RESET} {narr[:120]}")
-                if pred:
-                    print(f"     {BOLD}> PREDICTION:{RESET} {pred[:120]}")
+                from llm.output_parser import parse_reasoning_output
+                reasoning, answer, tags_parsed, fmt_q = parse_reasoning_output(raw_text)
+                if reasoning:
+                    print(f"     {BOLD}> REASONING:{RESET} {reasoning[:140]}")
+                if answer:
+                    print(f"     {GREEN}{BOLD}> ANSWER:{RESET} {answer[:120]}")
                 tags_str = ", ".join(tags_parsed[:8])
-                print(f"     {DIM}> TAGS: {tags_str}{RESET}")
-                print(f"     {DIM}> Format: {fmt_quality_label(fmt_q)}{RESET}")
+                print(f"     {DIM}> Tags: {tags_str}  Format: {fmt_quality_label(fmt_q)}{RESET}")
             else:
                 print(f"     {DIM}(no output){RESET}")
 

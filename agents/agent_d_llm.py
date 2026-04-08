@@ -4,7 +4,7 @@ from typing import List, Optional
 
 from state.schema import ZA, ZD
 from llm.provider import LLMProvider
-from llm.output_parser import parse_narrative_tags, parse_full_output
+from llm.output_parser import parse_narrative_tags, parse_full_output, parse_reasoning_output
 
 
 @dataclass
@@ -165,3 +165,84 @@ class AgentDLLM(StreamD):
             length_chars=len(narrative),
             grounding_violations=fmt_quality,
         )
+
+    # ─── Reasoning Mode (Phase G) ─────────────────────────────
+
+    def build_reasoning(self, canvas_manager, question: str | None = None) -> ZD:
+        """Canvas-based reasoning: read [MEMORY] → think → REASONING + ANSWER.
+
+        Always uses [MEMORY] format, never falls back to FACTS format.
+        The reasoning model speaks only this language.
+        """
+        # Canvas als [MEMORY] block — immer, auch wenn leer
+        memory_block = canvas_manager.to_prefix()
+        if not memory_block:
+            memory_block = (
+                "[MEMORY]\n"
+                f"agent_pos: {self.events[-1].agent_pos if self.events else '(0,0)'}\n"
+                "status: No facts discovered yet.\n"
+                "[/MEMORY]"
+            )
+
+        # Frage automatisch ableiten wenn nicht gegeben
+        if question is None:
+            question = self._infer_question(canvas_manager)
+
+        prompt = memory_block + "\n" + f"QUESTION: {question}\n"
+
+        try:
+            txt = self.llm.chat(
+                [{"role": "user", "content": prompt}],
+                temperature=0.0,
+                max_tokens=150,
+            )
+        except Exception:
+            txt = ""
+
+        if isinstance(txt, tuple):
+            txt = txt[0]
+        txt = txt.strip() if isinstance(txt, str) else str(txt)
+
+        reasoning, answer, tags, fmt_quality = parse_reasoning_output(txt)
+
+        # Deterministic hint injection (same as build_micro)
+        if self.events:
+            for e in reversed(self.events[-6:]):
+                if e.hint in ("A", "B"):
+                    forced = f"hint:{e.hint}"
+                    if forced not in tags and forced.lower() not in [t.lower() for t in tags]:
+                        tags.append(forced)
+                    break
+
+        return ZD(
+            narrative=reasoning,     # REASONING = "laut denken"
+            meaning_tags=tags,
+            length_chars=len(reasoning),
+            grounding_violations=fmt_quality,
+            prediction=answer,       # ANSWER = Handlungsempfehlung
+        )
+
+    def _infer_question(self, canvas_manager) -> str:
+        """Derive the right question from Canvas state + recent events."""
+        slots = canvas_manager.slots if hasattr(canvas_manager, 'slots') else {}
+
+        # Check if target is known
+        has_target = "target" in slots
+        has_hint = any(k.startswith("hint_") for k in slots)
+
+        # Check if agent is stuck (same position for last N events)
+        is_stuck = False
+        if len(self.events) >= 4:
+            recent_pos = [e.agent_pos for e in self.events[-4:]]
+            is_stuck = len(set(str(p) for p in recent_pos)) == 1
+
+        if is_stuck:
+            return "The agent is stuck and not making progress. What should it do?"
+        elif has_target:
+            return "Given the known target, what is the best strategy to reach it?"
+        elif has_hint:
+            return "A hint has been discovered. What does it tell us about the target?"
+        elif len(slots) <= 1:
+            return "What should the agent do in an unknown environment?"
+        else:
+            return "Based on the available information, what should the agent prioritize?"

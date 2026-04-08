@@ -654,21 +654,28 @@ class MvpKernel:
             self.agent_d.observe_step(
                 t=t, zA=zA, action=action, reward=0.0, done=done,
             )
-            # F.4: B's prediction for D's action context
-            zA_next = None
-            if action and self.agent_b is not None:
-                try:
-                    zA_next = self.agent_b.predict_next(zA, action)
-                except Exception:
-                    pass
-            zD = self.agent_d.build_micro(
-                goal_mode=zC.goal_mode,
-                goal_pos=(-1, -1),
-                last_n=5,
-                action=action,
-                zA_next=zA_next,
-            )
-            # F.4: Write prediction to canvas (kernel is the conductor)
+            # Phase G: Always use reasoning mode if canvas_manager is available
+            if (
+                self._canvas_manager is not None
+                and hasattr(self.agent_d, "build_reasoning")
+            ):
+                zD = self.agent_d.build_reasoning(self._canvas_manager)
+            else:
+                # Fallback for agents without build_reasoning (det AgentD, etc.)
+                zA_next = None
+                if action and self.agent_b is not None:
+                    try:
+                        zA_next = self.agent_b.predict_next(zA, action)
+                    except Exception:
+                        pass
+                zD = self.agent_d.build_micro(
+                    goal_mode=zC.goal_mode,
+                    goal_pos=(-1, -1),
+                    last_n=5,
+                    action=action,
+                    zA_next=zA_next,
+                )
+            # Write prediction/answer to canvas (kernel is the conductor)
             if (
                 hasattr(zD, "prediction") and zD.prediction
                 and self._canvas_manager is not None
