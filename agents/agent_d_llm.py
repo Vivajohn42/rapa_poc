@@ -203,7 +203,7 @@ class AgentDLLM(StreamD):
             txt = txt[0]
         txt = txt.strip() if isinstance(txt, str) else str(txt)
 
-        reasoning, answer, tags, fmt_quality = parse_reasoning_output(txt)
+        reasoning, answer, memo, tags, fmt_quality = parse_reasoning_output(txt)
 
         # Deterministic hint injection (same as build_micro)
         if self.events:
@@ -220,13 +220,31 @@ class AgentDLLM(StreamD):
             length_chars=len(reasoning),
             grounding_violations=fmt_quality,
             prediction=answer,       # ANSWER = Handlungsempfehlung
+            memo=memo,               # Phase H: note to future self
         )
 
     def _infer_question(self, canvas_manager) -> str:
         """Derive the right question from Canvas state + recent events."""
         slots = canvas_manager.slots if hasattr(canvas_manager, 'slots') else {}
 
-        # Check if target is known
+        # Filesystem context: check for files/directories slots
+        has_files = "files" in slots and slots["files"] != "none"
+        has_dirs = "directories" in slots and slots["directories"] != "none"
+        has_file_content = "file_content" in slots
+        has_self_note = "self_note" in slots
+
+        if has_file_content:
+            # We just read a file — analyze it
+            return f"We read a file. Based on the content and the goal, what is the answer or what should we do next?"
+        elif has_files and not has_dirs:
+            # In a directory with files but no subdirs — which file to read?
+            files = slots.get("files", "")
+            return f"We are in a directory with files: {files}. Which file should the agent read to achieve the goal?"
+        elif has_dirs:
+            # At a directory listing — which subdir to explore?
+            return "Based on the current directory and goal, what should the agent do next?"
+
+        # GridWorld/DoorKey context
         has_target = "target" in slots
         has_hint = any(k.startswith("hint_") for k in slots)
 

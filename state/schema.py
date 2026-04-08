@@ -21,6 +21,7 @@ class ZD(BaseModel):
     length_chars: int = 0
     grounding_violations: int = 0
     prediction: str = ""  # F.4: narrative anticipation of next state
+    memo: str = ""        # Phase H: note to future self (working memory)
 
 
 class ZPlan(BaseModel):

@@ -155,7 +155,7 @@ def run_live_episode(
 
             if raw_text:
                 from llm.output_parser import parse_reasoning_output
-                reasoning, answer, tags_parsed, fmt_q = parse_reasoning_output(raw_text)
+                reasoning, answer, memo_text, tags_parsed, fmt_q = parse_reasoning_output(raw_text)
                 if reasoning:
                     print(f"     {BOLD}> REASONING:{RESET} {reasoning[:140]}")
                 if answer:

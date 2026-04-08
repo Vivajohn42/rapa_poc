@@ -177,7 +177,7 @@ def main():
             d_str = ""
             if result.d_activated and hasattr(llm, '_last_generated') and llm._last_generated:
                 raw = tokenizer.decode(llm._last_generated, skip_special_tokens=True)
-                reasoning, answer, _, fmt = parse_reasoning_output(raw)
+                reasoning, answer, _memo, _, fmt = parse_reasoning_output(raw)
                 if reasoning:
                     d_str = f"\n     {BOLD}> REASONING:{RESET} {reasoning[:120]}"
                 if answer:

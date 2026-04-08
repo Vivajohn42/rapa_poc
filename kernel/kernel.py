@@ -681,6 +681,12 @@ class MvpKernel:
                 and self._canvas_manager is not None
             ):
                 self._canvas_manager.write_prediction(zD.prediction)
+            # Phase H: Write MEMO to canvas as self_note (overwrites each tick)
+            if (
+                hasattr(zD, "memo") and zD.memo
+                and self._canvas_manager is not None
+            ):
+                self._canvas_manager.write("self_note", zD.memo)
             # Phase 3: UM sync via MeaningReport (no tag parsing)
             if self._unified_memory is not None:
                 _d_report = self.agent_d.report_meaning()

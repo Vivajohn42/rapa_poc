@@ -151,34 +151,44 @@ def parse_full_output(txt: str) -> tuple[str, str, list[str], int]:
     return narrative, prediction, tags, fmt
 
 
-def parse_reasoning_output(txt: str) -> tuple[str, str, list[str], int]:
-    """Parse REASONING + ANSWER from Chain-of-Thought output.
+def parse_reasoning_output(txt: str) -> tuple[str, str, str, list[str], int]:
+    """Parse REASONING + ANSWER + MEMO from Chain-of-Thought output.
 
-    Expected format (REASONING before ANSWER):
+    Expected format:
         REASONING: <chain-of-thought>
         ANSWER: <final conclusion>
+        MEMO: <note for future self>  (optional, last block)
 
-    Returns: (reasoning, answer, tags, format_quality)
+    Returns: (reasoning, answer, memo, tags, format_quality)
       tags are extracted from reasoning text (predict:*, hint:*, etc.)
     """
     if not txt or not txt.strip():
-        return "", "", ["llm_format_fallback"], 3
+        return "", "", "", ["llm_format_fallback"], 3
 
     reasoning = ""
     answer = ""
+    memo = ""
 
-    # Extract REASONING (everything between REASONING: and ANSWER: or end)
+    # Extract REASONING (everything between REASONING: and ANSWER: or MEMO: or end)
     m_reason = re.search(
-        r'REASONING:\s*(.+?)(?=\n\s*ANSWER:|\Z)',
+        r'REASONING:\s*(.+?)(?=\n\s*(?:ANSWER:|MEMO:)|\Z)',
         txt, re.IGNORECASE | re.DOTALL,
     )
     if m_reason:
         reasoning = m_reason.group(1).strip()
 
-    # Extract ANSWER (everything after ANSWER:)
-    m_answer = re.search(r'ANSWER:\s*(.+?)(?=\n|$)', txt, re.IGNORECASE)
+    # Extract ANSWER (between ANSWER: and MEMO: or end)
+    m_answer = re.search(
+        r'ANSWER:\s*(.+?)(?=\n\s*MEMO:|\n|$)',
+        txt, re.IGNORECASE,
+    )
     if m_answer:
         answer = m_answer.group(1).strip()
+
+    # Extract MEMO (last block — everything from MEMO: to end, multiline)
+    m_memo = re.search(r'MEMO:\s*(.+)', txt, re.IGNORECASE | re.DOTALL)
+    if m_memo:
+        memo = m_memo.group(1).strip()
 
     # Extract implicit tags from reasoning text
     tags: list[str] = []
@@ -208,7 +218,7 @@ def parse_reasoning_output(txt: str) -> tuple[str, str, list[str], int]:
         tags = ["llm_format_fallback"]
         fmt = 3
 
-    return reasoning, answer, tags, fmt
+    return reasoning, answer, memo, tags, fmt
 
 
 def _split_tags(raw: str) -> list[str]:

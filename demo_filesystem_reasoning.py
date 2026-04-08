@@ -139,39 +139,33 @@ def main():
     print(f"  {DIM}Secret: [hidden]{RESET}")
     print(f"{'='*65}")
 
-    # Create canvas + reasoning chip
+    # Create canvas + reasoning chip + agent D
     canvas = KernelCanvasManager(n_slots=8)
     llm = DEFProvider(model=model, tokenizer=tokenizer, device=device,
                       canvas_manager=canvas, forced_prefix=None)
+    from agents.agent_d_llm import AgentDLLM
+    agent_d = AgentDLLM(llm)
 
     solved = False
     for step in range(args.max_steps):
         # Update canvas with current observation
         update_fs_canvas(canvas, obs, env.goal)
 
-        # Build reasoning prompt from canvas — adapt question to context
-        memory_block = canvas.to_prefix()
-        if obs.files and not obs.dirs:
-            question = f"QUESTION: We are in {obs.current_dir} with files: {', '.join(obs.files)}. Which file should the agent read to achieve the goal?"
-        elif obs.last_read:
-            question = f"QUESTION: We read {obs.last_read_name}. Based on the content, what is the answer to the goal?"
-        else:
-            question = "QUESTION: Based on the current directory and goal, what should the agent do next?"
-
-        prompt = memory_block + "\n" + question + "\n"
-
+        # Use build_reasoning() — _infer_question adapts to Canvas context
         t0 = time.perf_counter()
-        txt = llm.chat(
-            [{"role": "user", "content": prompt}],
-            temperature=0.0, max_tokens=150,
-        )
+        zD = agent_d.build_reasoning(canvas)
         dt = time.perf_counter() - t0
 
-        if isinstance(txt, tuple):
-            txt = txt[0]
-        txt = txt.strip() if isinstance(txt, str) else ""
+        reasoning = zD.narrative
+        answer = zD.prediction
+        memo = zD.memo
 
-        reasoning, answer, tags, fmt = parse_reasoning_output(txt)
+        # Write MEMO to canvas (like kernel does — overwrites each tick)
+        if memo:
+            canvas.write("self_note", memo)
+        # Write prediction/answer to canvas
+        if answer:
+            canvas.write_prediction(answer)
 
         # Convert ANSWER to filesystem action
         action = extract_action(answer or reasoning, obs)
@@ -189,6 +183,8 @@ def main():
             print(f"    {MAGENTA}REASONING:{RESET} {reasoning[:120]}")
         if answer:
             print(f"    {GREEN}ANSWER:{RESET} {answer[:100]}")
+        if memo:
+            print(f"    {YELLOW}MEMO:{RESET} {memo[:120]}")
         print(f"    {BLUE}ACTION:{RESET} {action}")
 
         if obs.last_read and obs.last_read_name:
