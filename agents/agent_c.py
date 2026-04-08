@@ -100,6 +100,26 @@ class AgentC(StreamC):
 
         # tie-break using memory preference if uncertain
         if memory and delta < tie_break_delta:
+            # Phase G: reasoning_target from D's ANSWER (highest priority)
+            reasoning_target = memory.get("reasoning_target")
+            if reasoning_target and isinstance(reasoning_target, (tuple, list)):
+                # Score actions by distance to reasoning_target
+                best_rt_action = None
+                best_rt_dist = float("inf")
+                best_score = scored[0][1]
+                near_best = {a for a, s in scored if (best_score - s) <= tie_break_delta}
+                for a, s in scored:
+                    if a not in near_best:
+                        continue
+                    zA_next = predict_next_fn(zA, a)
+                    d = self._manhattan(zA_next.agent_pos, tuple(reasoning_target))
+                    if d < best_rt_dist:
+                        best_rt_dist = d
+                        best_rt_action = a
+                if best_rt_action:
+                    return best_rt_action, scored
+
+            # PlannerBC tie-break (lower priority)
             pref = memory.get("tie_break_preference")
             if isinstance(pref, list) and pref:
                 best = scored[0][1]
