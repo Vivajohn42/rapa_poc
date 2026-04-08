@@ -199,6 +199,9 @@ class DoorKeyAgentC(StreamC):
         the door from obstacles when computing distance to it (since the
         agent needs to reach the cell adjacent to the door, not through it).
         """
+        # Phase G: reasoning_target from D's ANSWER (highest priority)
+        if memory and "reasoning_target" in memory and memory["reasoning_target"] is not None:
+            return tuple(memory["reasoning_target"])
         if memory and "target" in memory and memory["target"] is not None:
             return tuple(memory["target"])
         if self._goal.target is not None:

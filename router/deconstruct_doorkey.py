@@ -18,6 +18,7 @@ The target is set based on phase + discovered positions.
 """
 from __future__ import annotations
 
+import re
 from typing import Dict, Optional, Tuple
 
 from state.schema import ZC, ZD
@@ -90,6 +91,14 @@ def deconstruct_doorkey_d_to_c(
             zC.memory["target"] = goal_map["goal"]
         else:
             zC.memory["target"] = None  # explore until goal found
+
+    # Phase G: reasoning_target from D's ANSWER (coordinate extraction)
+    if hasattr(zD, "prediction") and zD.prediction:
+        pos_match = re.search(r'\((\d+),\s*(\d+)\)', zD.prediction)
+        if pos_match:
+            zC.memory["reasoning_target"] = (
+                int(pos_match.group(1)), int(pos_match.group(2))
+            )
 
     # Store narrative for introspection
     zC.memory["last_narrative"] = zD.narrative
