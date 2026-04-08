@@ -39,7 +39,7 @@ class AgentC(StreamC):
     def _manhattan(a: Tuple[int, int], b: Tuple[int, int]) -> int:
         return abs(a[0] - b[0]) + abs(a[1] - b[1])
 
-    def score_action(self, zA: ZA, zA_next: ZA) -> float:
+    def score_action(self, zA: ZA, zA_next: ZA, override_target=None) -> float:
         """
         Base score:
           seek  -> positive if we got closer (d_now - d_next)
@@ -48,8 +48,10 @@ class AgentC(StreamC):
         Anti-stay penalty:
           if action results in no movement (hit wall/obstacle), subtract a small penalty
           to prevent degenerate "freeze" policies.
+
+        override_target: Phase G — D's reasoning_target overrides goal.target
         """
-        target = self.goal.target
+        target = override_target or self.goal.target
         if target is None:
             target = (-1, -1)  # Safe fallback when target not yet discovered
         d_now = self._manhattan(zA.agent_pos, target)
@@ -84,10 +86,18 @@ class AgentC(StreamC):
           and memory contains "tie_break_preference" list, pick the first preferred
           action among near-best actions.
         """
+        # Phase G: Dynamic Target Override from D's reasoning
+        # If D has a reasoning_target, C navigates there INSTEAD of goal.target
+        reasoning_target = None
+        if memory:
+            rt = memory.get("reasoning_target")
+            if rt and isinstance(rt, (tuple, list)):
+                reasoning_target = tuple(rt)
+
         scored: List[Tuple[str, float]] = []
         for a in ACTIONS:
             zA_next = predict_next_fn(zA, a)
-            s = self.score_action(zA, zA_next)
+            s = self.score_action(zA, zA_next, override_target=reasoning_target)
             scored.append((a, s))
 
         scored.sort(key=lambda x: x[1], reverse=True)
@@ -98,28 +108,8 @@ class AgentC(StreamC):
         else:
             delta = 999.0
 
-        # tie-break using memory preference if uncertain
+        # tie-break using PlannerBC preference if uncertain
         if memory and delta < tie_break_delta:
-            # Phase G: reasoning_target from D's ANSWER (highest priority)
-            reasoning_target = memory.get("reasoning_target")
-            if reasoning_target and isinstance(reasoning_target, (tuple, list)):
-                # Score actions by distance to reasoning_target
-                best_rt_action = None
-                best_rt_dist = float("inf")
-                best_score = scored[0][1]
-                near_best = {a for a, s in scored if (best_score - s) <= tie_break_delta}
-                for a, s in scored:
-                    if a not in near_best:
-                        continue
-                    zA_next = predict_next_fn(zA, a)
-                    d = self._manhattan(zA_next.agent_pos, tuple(reasoning_target))
-                    if d < best_rt_dist:
-                        best_rt_dist = d
-                        best_rt_action = a
-                if best_rt_action:
-                    return best_rt_action, scored
-
-            # PlannerBC tie-break (lower priority)
             pref = memory.get("tie_break_preference")
             if isinstance(pref, list) and pref:
                 best = scored[0][1]
